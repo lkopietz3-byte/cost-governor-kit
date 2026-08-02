@@ -1,0 +1,32 @@
+{
+  "name": "cost-governor-kit",
+  "version": "0.1.0",
+  "description": "Three cost-safety properties every AI-calling app should have, assembled into one library: a pre-call dollar ceiling with live caller-supplied rates, correct cache-aware pricing math, and a reserve-then-confirm atomic usage-counting contract.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./pricing": "./src/pricing.ts",
+    "./preCallCeiling": "./src/preCallCeiling.ts",
+    "./reserveConfirm": "./src/reserveConfirm.ts"
+  },
+  "files": [
+    "src",
+    "reference-impl",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}
