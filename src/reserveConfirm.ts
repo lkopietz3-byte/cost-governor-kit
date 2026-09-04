@@ -1,7 +1,10 @@
 /**
- * reserveConfirm.ts — the two-phase, database-agnostic contract for atomic
- * usage counting: reserve (check), call, confirm (commit) — never commit on
- * a failed call.
+ * reserveConfirm.ts — two database-agnostic usage-counting patterns.
+ *
+ * `withReserveConfirm` is source-compatible and keeps its useful failure
+ * guarantee, but its read-only check cannot reserve capacity and is advisory
+ * under concurrency. `withCapacityReservation` uses an adapter that atomically
+ * reserves capacity before upstream work, then confirms or releases that hold.
  *
  * Extracted from cruise-almanac's api/chat.js, which fixed a real slot-leak
  * bug (AUDIT-2026-05-01-v2, finding F3-CC-E-4). The original (pre-fix) code
@@ -18,7 +21,7 @@
  * quota to a single flaky request plus its retry, with zero real usage to
  * show for it.
  *
- * THE FIX: split into two phases.
+ * THE ADVISORY FIX: split into two phases.
  *   Phase 1 (BEFORE the call): check the count WITHOUT incrementing. If
  *     over the limit, deny (e.g. HTTP 429) with zero side effects — the
  *     denial itself costs nothing, so it's safe to retry a check.
@@ -28,11 +31,11 @@
  *
  * From cruise-almanac's own comment on the fix: "the gate only CHECKS, the
  * bump only fires on a confirmed-successful upstream." That's the entire
- * pattern this module encodes as a portable contract.
+ * pattern `withReserveConfirm` encodes as a portable, advisory contract.
  *
  * DATABASE-AGNOSTIC BY DESIGN: this file defines only an interface
- * (`UsageLedger`) and an orchestrator function that calls it
- * (`withReserveConfirm`). It has no Supabase, Postgres, or any other
+ * (`UsageLedger`/`CapacityReservationLedger`) and small orchestrators. It has
+ * no Supabase, Postgres, or any other
  * database dependency — implement `UsageLedger` against whatever storage
  * your app already uses (Postgres RPC, Redis, DynamoDB, an in-memory map for
  * tests). See reference-impl/supabase-usage-ledger.sql for a ready-to-copy
@@ -55,19 +58,20 @@ export interface UsageLedger {
   checkUnderLimit(key: string, limit: number): Promise<boolean>;
 
   /**
-   * Phase 2 — mutating. Atomically increments usage under `key`. Call this
+   * Phase 2 — mutating. Increments usage under `key`. Call this
    * ONLY after the guarded call has succeeded — never speculatively, never
    * before the call, and never if the call threw. Implementations should
-   * make this atomic against concurrent commits for the same key (e.g. a
-   * SQL `UPDATE ... WHERE count < limit RETURNING ...`, not a
-   * read-then-write in application code) so two concurrent successful calls
-   * can't both slip past the limit between their own check and commit.
+   * make this atomic with respect to their own writes, but this method does
+   * not receive `limit` or a reservation. It cannot turn the preceding
+   * read-only check into a strict concurrent ceiling. Use
+   * `CapacityReservationLedger` + `withCapacityReservation` when the limit
+   * must hold under concurrent requests.
    */
   commitUsage(key: string): Promise<void>;
 }
 
 /**
- * Orchestrates the reserve-then-confirm pattern around any async call.
+ * Orchestrates the legacy check-then-commit pattern around any async call.
  *
  * 1. Calls `ledger.checkUnderLimit(key, limit)`. If it returns false, denies
  *    immediately — `doTheCall` is never invoked and nothing is committed.
@@ -102,12 +106,10 @@ export async function withReserveConfirm<T>(
   }
 
   // If doTheCall() throws, this function throws too (no try/catch here) and
-  // commitUsage is never reached — that omission IS the fix. Do not wrap
-  // this call in a try/catch that swallows the error; let it propagate so
-  // the caller's normal error handling (and the caller's own retry logic,
-  // if any) applies unchanged. A retry after a thrown error simply re-runs
-  // checkUnderLimit from scratch, which is safe because phase 1 never
-  // mutates state.
+  // commitUsage is never reached. This preserves the legacy source-compatible
+  // behavior, but it cannot prove whether a timeout reached a paid provider.
+  // Re-running the read-only quota check is safe; retrying paid work is a
+  // caller decision that requires provider reconciliation/idempotency.
   const result = await doTheCall();
 
   await ledger.commitUsage(key);
@@ -118,3 +120,200 @@ export async function withReserveConfirm<T>(
 export type ReserveConfirmResult<T> =
   | { allowed: true; result: T }
   | { allowed: false; result?: undefined };
+
+// ---------------------------------------------------------------------------
+// Strict capacity reservation
+// ---------------------------------------------------------------------------
+
+/** One adapter-issued hold on capacity. Pass it back unchanged to the adapter. */
+export interface CapacityReservation {
+  id: string;
+  key: string;
+  /** Stable idempotency key for one logical upstream operation. */
+  operationId: string;
+  /** ISO-8601 expiry selected and enforced by the adapter. */
+  expiresAt: string;
+}
+
+export interface ReserveCapacityRequest {
+  key: string;
+  /** Strict maximum for committed plus active reservations under this key. */
+  limit: number;
+  /** Reuse for recovery of this operation; never replace after an ambiguity. */
+  operationId: string;
+}
+
+export type ReserveCapacityResult =
+  /** This invocation newly acquired the hold and is the only one allowed to execute work. */
+  | { status: "acquired"; reservation: CapacityReservation }
+  /** Capacity was unavailable before this operation acquired a hold. */
+  | { status: "denied"; reason?: string }
+  /** The same operation is already active or unresolved; reconcile, do not execute again. */
+  | { status: "operation_in_progress"; reservation: CapacityReservation }
+  /** The same operation is already terminal; recover its durable outcome, do not execute again. */
+  | { status: "operation_terminal"; operationId: string; reason?: string };
+
+/**
+ * Storage contract for a strict concurrent capacity limit.
+ *
+ * `reserveCapacity` MUST atomically count confirmed usage and unexpired active
+ * reservations for `key`, and create a hold only when that total is below
+ * `limit`. Repeating `(key, operationId)` MUST return
+ * `operation_in_progress` for an active/unresolved hold, or
+ * `operation_terminal` after it is final. Only the invocation that receives
+ * `acquired` may run provider work; duplicates must never create another hold
+ * or restart work. Confirmation and release MUST be idempotent too. Adapters
+ * need durable state, an expiry longer than expected provider work, and a
+ * reconciliation/fencing policy for expired or ambiguous reservations. Expiry
+ * alone never proves possibly executing work is safe to release.
+ */
+export interface CapacityReservationLedger {
+  reserveCapacity(request: ReserveCapacityRequest): Promise<ReserveCapacityResult>;
+  confirmReservation(reservation: CapacityReservation): Promise<void>;
+  releaseReservation(reservation: CapacityReservation): Promise<void>;
+}
+
+/**
+ * Return `failed` only when the provider definitely performed no charge and
+ * no relevant side effect. A user-visible rejection alone is not enough. Throw
+ * or reject when its outcome is unknown (for example a timeout after request
+ * write), so the reservation remains held for reconciliation.
+ */
+export type CapacityWorkOutcome<T> =
+  | { status: "succeeded"; value: T }
+  | { status: "failed"; error: unknown };
+
+export type CapacityReservationResult<T> =
+  | { status: "denied"; reason?: string }
+  | { status: "operation_in_progress"; reservation: CapacityReservation }
+  | { status: "operation_terminal"; operationId: string; reason?: string }
+  | { status: "confirmed"; reservation: CapacityReservation; value: T }
+  | { status: "released_after_failure"; reservation: CapacityReservation; error: unknown }
+  | {
+      status: "release_failed";
+      reservation: CapacityReservation;
+      workError: unknown;
+      releaseError: unknown;
+    }
+  | {
+      status: "work_outcome_ambiguous";
+      reservation: CapacityReservation;
+      error: unknown;
+    }
+  | {
+      status: "confirmation_failed";
+      reservation: CapacityReservation;
+      value: T;
+      error: unknown;
+    };
+
+/**
+ * Reserve capacity before one classified upstream operation. Denied work is
+ * never invoked. Known failed work releases the exact hold; success confirms.
+ * Ambiguous work and confirmation failures keep the hold and never retry or
+ * blindly release possibly paid work.
+ */
+export async function withCapacityReservation<T>(
+  ledger: CapacityReservationLedger,
+  request: ReserveCapacityRequest,
+  doTheWork: (reservation: CapacityReservation) => Promise<CapacityWorkOutcome<T>>,
+): Promise<CapacityReservationResult<T>> {
+  validateReserveCapacityRequest(request);
+  const decision = await ledger.reserveCapacity(request);
+  if (!decision || typeof decision !== "object" || !("status" in decision)) {
+    throw new Error("withCapacityReservation: adapter returned an invalid reservation decision");
+  }
+  const decisionStatus: unknown = (decision as { status?: unknown }).status;
+  if (decision.status === "denied") return { status: "denied", reason: decision.reason };
+  if (decision.status === "operation_in_progress") {
+    validateReservationIdentity(decision.reservation, request, false);
+    return { status: "operation_in_progress", reservation: decision.reservation };
+  }
+  if (decision.status === "operation_terminal") {
+    if (decision.operationId !== request.operationId) {
+      throw new Error("withCapacityReservation: adapter terminal decision operationId does not match request");
+    }
+    return { status: "operation_terminal", operationId: decision.operationId, reason: decision.reason };
+  }
+  if (decisionStatus !== "acquired") {
+    throw new Error(`withCapacityReservation: adapter returned unknown reservation decision status ${String(decisionStatus)}`);
+  }
+
+  const { reservation } = decision;
+  validateReservationIdentity(reservation, request);
+  let outcome: CapacityWorkOutcome<T>;
+  try {
+    outcome = await doTheWork(reservation);
+  } catch (error) {
+    return { status: "work_outcome_ambiguous", reservation, error };
+  }
+
+  if (!isCapacityWorkOutcome(outcome)) {
+    return {
+      status: "work_outcome_ambiguous",
+      reservation,
+      error: new Error("withCapacityReservation: doTheWork returned an invalid outcome"),
+    };
+  }
+
+  if (outcome.status === "failed") {
+    try {
+      await ledger.releaseReservation(reservation);
+      return { status: "released_after_failure", reservation, error: outcome.error };
+    } catch (releaseError) {
+      return { status: "release_failed", reservation, workError: outcome.error, releaseError };
+    }
+  }
+
+  try {
+    await ledger.confirmReservation(reservation);
+    return { status: "confirmed", reservation, value: outcome.value };
+  } catch (error) {
+    return { status: "confirmation_failed", reservation, value: outcome.value, error };
+  }
+}
+
+function validateReserveCapacityRequest(request: ReserveCapacityRequest): void {
+  if (!Number.isSafeInteger(request.limit) || request.limit < 0) {
+    throw new Error("withCapacityReservation: limit must be a non-negative safe integer");
+  }
+  if (typeof request.key !== "string" || !request.key.trim()) {
+    throw new Error("withCapacityReservation: key must be a non-empty string");
+  }
+  if (typeof request.operationId !== "string" || !request.operationId.trim()) {
+    throw new Error("withCapacityReservation: operationId must be a non-empty string");
+  }
+}
+
+function validateReservationIdentity(
+  reservation: CapacityReservation,
+  request: ReserveCapacityRequest,
+  requireUnexpired = true,
+): void {
+  if (!reservation || typeof reservation !== "object") {
+    throw new Error("withCapacityReservation: adapter returned an invalid reservation");
+  }
+  if (typeof reservation.id !== "string" || !reservation.id.trim()) {
+    throw new Error("withCapacityReservation: reservation id must be a non-empty string");
+  }
+  if (reservation.key !== request.key) {
+    throw new Error("withCapacityReservation: reservation key does not match request");
+  }
+  if (reservation.operationId !== request.operationId) {
+    throw new Error("withCapacityReservation: reservation operationId does not match request");
+  }
+  if (typeof reservation.expiresAt !== "string" || !Number.isFinite(Date.parse(reservation.expiresAt))) {
+    throw new Error("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+  }
+  if (requireUnexpired && Date.parse(reservation.expiresAt) <= Date.now()) {
+    throw new Error("withCapacityReservation: adapter returned an expired reservation");
+  }
+}
+
+function isCapacityWorkOutcome(value: unknown): value is CapacityWorkOutcome<unknown> {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (record.status === "succeeded") return Object.prototype.hasOwnProperty.call(record, "value");
+  if (record.status === "failed") return Object.prototype.hasOwnProperty.call(record, "error");
+  return false;
+}

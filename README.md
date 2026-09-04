@@ -11,10 +11,9 @@ AI-calling apps, no single app had all three of together:
    writes split into two different multipliers (5-minute vs. 1-hour TTL), and
    collapsing them into one flat multiplier silently under-reports 1-hour
    cache turns by about 37.5%.
-3. **Atomic, race-safe usage counting** via a reserve-then-confirm two-phase
-   pattern — check a limit before the call, only commit usage after the call
-   *actually succeeds* — so a failed upstream call plus a client retry never
-   burns two slots for one real usage.
+3. **Two usage-counting choices:** a source-compatible advisory
+   check-then-commit helper that avoids charging known failures, and a strict
+   atomic-reservation contract for concurrent capacity limits.
 
 Every piece here was extracted from a real bug fix or a real gap found in
 production code, not designed in the abstract. See the doc comments in each
@@ -123,10 +122,12 @@ console.log(`rates: ${formatRatesForLog(rates)} <- VERIFY against current pricin
 
 ---
 
-## 3. Reserve-then-confirm usage counting (`src/reserveConfirm.ts`)
+## 3. Usage counting (`src/reserveConfirm.ts`)
 
-A database-agnostic contract for atomic usage limits, plus an orchestrator
-that wires it around any async call.
+### Legacy advisory check-then-commit
+
+A database-agnostic, source-compatible helper that checks before work and
+commits only after a successful call.
 
 ```ts
 import { withReserveConfirm, type UsageLedger } from 'cost-governor-kit/reserveConfirm';
@@ -161,13 +162,15 @@ interface UsageLedger {
 `withReserveConfirm` calls `checkUnderLimit` first; if it returns `false`, it
 denies immediately without ever invoking your call. Otherwise it invokes
 `doTheCall()`. **If `doTheCall()` throws, the error propagates unchanged and
-`commitUsage` is never called** — that's the entire fix, expressed as code
-structure rather than a comment you have to trust.
+`commitUsage` is never called.** That only means the helper did not count the
+attempt; it does not prove a timeout failed before a paid provider accepted
+work. Re-running the read-only check is safe. Retrying paid work requires the
+caller's own provider reconciliation or idempotency mechanism.
 
 **Where this comes from:** a real production bug. The original code checked
 a user's daily limit and incremented it in the *same* step, before calling
-the upstream LLM API. When the upstream call failed (a 5xx, a timeout) and
-the client did the reasonable thing and retried, the retry burned a *second*
+the upstream LLM API. When the upstream call was known to fail before a
+successful response, a later safely-reconciled attempt burned a *second*
 slot for a request that had never actually succeeded even once — a single
 flaky call plus its retry could burn a user's whole daily quota with zero
 real usage to show for it. The fix split the gate into two phases: check
@@ -187,12 +190,80 @@ product-specific columns) so it drops into any Postgres/Supabase project. The
 SQL file includes a short example TypeScript adapter wiring it up to
 `UsageLedger` via `supabase.rpc(...)`.
 
-**This is the concrete, provable version of the contract** — the interface
-above is deliberately abstract so it works for any database; the SQL file is
-the specific proof that the pattern is actually implementable correctly,
-including the concurrency edge case (two concurrent requests both passing
-Phase 1 in the same tick) that the two-phase split alone doesn't solve —
-that's what the `FOR UPDATE` row lock in `usage_ledger_commit_usage` is for.
+### What the legacy helper guarantees
+
+`withReserveConfirm` is **advisory under concurrency**, not a strict capacity
+reservation. Its `checkUnderLimit(key, limit)` call is read-only and its later
+`commitUsage(key)` has neither a limit nor a reservation token. Two concurrent
+requests can both pass the check before either commits. It still provides a
+valuable narrower guarantee: a call that throws before reporting success never
+commits usage, so a known failed call does not burn a slot. Keep using it where
+that behavior is sufficient and source compatibility matters.
+
+### Strict concurrent capacity: atomic reservation
+
+Use `withCapacityReservation` when the limit must hold across concurrent
+requests. The adapter reserves capacity **before** the provider is invoked;
+committed usage plus active reservations must never exceed the supplied limit.
+
+```ts
+import {
+  withCapacityReservation,
+  type CapacityReservationLedger,
+} from 'cost-governor-kit/reserveConfirm';
+
+declare const ledger: CapacityReservationLedger;
+
+const result = await withCapacityReservation(
+  ledger,
+  { key: `${userId}:${today}`, limit: 5, operationId: requestId },
+  async (reservation) => {
+    const response = await callYourLlmApi(prompt, { idempotencyKey: reservation.operationId });
+    return { status: 'succeeded', value: response };
+  },
+);
+
+if (result.status === 'denied') return send429('Daily limit reached');
+if (result.status === 'confirmed') return send200(result.value);
+// `operation_in_progress`, `operation_terminal`, `confirmation_failed`,
+// `work_outcome_ambiguous`, and `release_failed` are recovery states.
+// Do not make a second paid provider call.
+return send503('Usage operation needs reconciliation');
+```
+
+`CapacityReservationLedger` has three methods: `reserveCapacity`,
+`confirmReservation`, and `releaseReservation`. Its implementation is the
+safety boundary. `reserveCapacity` must atomically count confirmed usage and
+unexpired active reservations before making a hold. It returns `acquired` only
+to the invocation that newly owns execution. A duplicate `(key, operationId)`
+must return `operation_in_progress` while its hold is active, or
+`operation_terminal` after finalization; neither state may invoke the provider
+again or take another slot. The adapter must make confirmation and release
+idempotent. Persist operation IDs with provider idempotency keys where the
+provider supports them.
+
+Before invoking the provider, `withCapacityReservation` validates that the
+adapter decision is exactly `acquired` and that its reservation has a nonempty
+ID, the requested key and operation ID, and a valid unexpired timestamp.
+Unknown decisions or malformed holds fail closed before work runs.
+For `operation_in_progress`, identity and timestamp syntax are still checked,
+but an expired unresolved hold is returned as recovery metadata and never runs
+work; expiry is not permission to release or restart it.
+
+The helper releases only an explicit `{ status: 'failed' }` outcome. Return
+that only when the provider definitely performed no charge and no relevant
+side effect; an unsuccessful user experience alone is not enough. A thrown
+provider operation becomes `work_outcome_ambiguous`, because a timeout can
+occur after paid work was accepted; the hold remains in place. Likewise,
+`confirmation_failed` retains the hold and the successful provider value. The
+helper never retries paid work or blindly releases either state. Reconcile with
+the provider and the ledger using the same `operationId` before retrying.
+
+Reservation expiry is not a substitute for reconciliation. Choose an expiry
+longer than the expected provider operation, use durable operation state and
+fencing/reconciliation for expirations, and retain enough evidence to
+investigate ambiguity. Expiry never makes possibly executing work safe to
+release merely to make capacity look available.
 
 ---
 
@@ -215,18 +286,16 @@ that's what the `FOR UPDATE` row lock in `usage_ledger_commit_usage` is for.
   from the response's actual usage block with `estimateCostUsd` and use that
   — not the pre-call estimate — as your running total for the *next*
   check's `spentSoFarUsd`.
-- **`reserveConfirm`'s atomicity is only as good as your `UsageLedger`
-  implementation.** The interface documents the requirement (commit must be
-  atomic against concurrent commits for the same key), but this library
-  can't enforce that inside your own database. Use the SQL reference
-  implementation's `FOR UPDATE` pattern as the model for correctness if
-  you're writing your own.
-- **No retries, no backoff, no queueing.** All three modules are
-  synchronous decision points, not a full resilience layer. Wrap them with
-  your own retry logic if you need it — `withReserveConfirm` is explicitly
-  designed to make retries *safe* (a retry after a thrown error just
-  re-checks, it never double-commits), but it doesn't perform retries for
-  you.
+- **`withReserveConfirm` is advisory, not strict under concurrency.** It
+  avoids committing known failed work but cannot reserve capacity. For a hard
+  concurrent cap, implement `CapacityReservationLedger` and use
+  `withCapacityReservation`; its adapter is responsible for an atomic
+  committed-plus-active-reservations check.
+- **No retries, no backoff, no queueing.** All three modules are synchronous
+  decision points, not a full resilience layer. The library never retries.
+  Retrying a read-only quota check is safe; retrying paid work after an error
+  is safe only after provider reconciliation or under that provider's durable
+  idempotency guarantee.
 
 ## Files
 
@@ -236,7 +305,7 @@ src/
   pricing.test.ts
   preCallCeiling.ts        Pre-call dollar ceiling, live rates required
   preCallCeiling.test.ts
-  reserveConfirm.ts        UsageLedger contract + withReserveConfirm orchestrator
+  reserveConfirm.ts        Advisory helper + strict reservation contracts
   reserveConfirm.test.ts
   index.ts                 Barrel export
 reference-impl/
