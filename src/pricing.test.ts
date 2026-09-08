@@ -87,7 +87,7 @@ describe('estimateCostUsd — validates its public numeric inputs', () => {
 
     it('rejects an explicitly supplied null value', () => {
       expect(() =>
-        estimateCostUsd(rates, { [field]: null } as unknown as Parameters<typeof estimateCostUsd>[1]),
+        estimateCostUsd(rates, { [field]: null }),
       ).toThrow(new RegExp(field));
     });
   });

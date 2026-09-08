@@ -40,7 +40,7 @@
     "build": "tsc -p tsconfig.build.json",
     "verify:package": "node scripts/verify-package.mjs",
     "lint": "eslint src scripts eslint.config.mjs --max-warnings=0",
-    "audit:dependencies": "npm audit --include=dev --audit-level=low"
+    "audit:dependencies": "npm audit --package-lock-only --include=dev --ignore-scripts --audit-level=low"
   },
   "dependencies": {},
   "devDependencies": {
