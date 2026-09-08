@@ -62,7 +62,8 @@ export const CACHE_CREATION_1H_MULTIPLIER = 2.0;
 
 /** Token counts for a single call (or a projected/estimated single call).
  * All fields are optional and default to 0, so callers can pass only what they have —
- * e.g. a caller with no cache usage can pass just `{ inputTokens, outputTokens }`. */
+ * e.g. a caller with no cache usage can pass just `{ inputTokens, outputTokens }`.
+ * Every supplied count must be a non-negative safe integer. */
 export interface UsageTokens {
   /** Uncached input tokens, billed at the model's full input rate. */
   inputTokens?: number;
@@ -88,30 +89,68 @@ export interface UsageTokens {
  *
  * `rates` is a required parameter with no default — see preCallCeiling.ts for
  * why a stale hardcoded price must never silently corrupt a cost estimate.
+ * Both rates must be finite, non-negative numbers. Every supplied token count
+ * must be a non-negative safe integer. Invalid inputs and arithmetic overflow
+ * throw rather than returning a misleading cost.
  */
 export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
-  const inputTokens = usage.inputTokens ?? 0;
-  const outputTokens = usage.outputTokens ?? 0;
-  const cacheReadTokens = usage.cacheReadTokens ?? 0;
-  const cacheCreation5mTokens = usage.cacheCreation5mTokens ?? 0;
-  const cacheCreation1hTokens = usage.cacheCreation1hTokens ?? 0;
+  assertRate('inputPerMillion', rates?.inputPerMillion);
+  assertRate('outputPerMillion', rates?.outputPerMillion);
+  if (!usage || typeof usage !== 'object') {
+    throw new Error('estimateCostUsd: usage must be an object of token counts');
+  }
 
-  const costUsd =
-    (inputTokens * rates.inputPerMillion +
-      cacheReadTokens * rates.inputPerMillion * CACHE_READ_MULTIPLIER +
-      cacheCreation5mTokens * rates.inputPerMillion * CACHE_CREATION_5M_MULTIPLIER +
-      cacheCreation1hTokens * rates.inputPerMillion * CACHE_CREATION_1H_MULTIPLIER +
-      outputTokens * rates.outputPerMillion) /
-    1_000_000;
+  const inputTokens = tokenCountOrZero(usage, 'inputTokens');
+  const outputTokens = tokenCountOrZero(usage, 'outputTokens');
+  const cacheReadTokens = tokenCountOrZero(usage, 'cacheReadTokens');
+  const cacheCreation5mTokens = tokenCountOrZero(usage, 'cacheCreation5mTokens');
+  const cacheCreation1hTokens = tokenCountOrZero(usage, 'cacheCreation1hTokens');
+
+  const unscaledCostUsd =
+    inputTokens * rates.inputPerMillion +
+    cacheReadTokens * rates.inputPerMillion * CACHE_READ_MULTIPLIER +
+    cacheCreation5mTokens * rates.inputPerMillion * CACHE_CREATION_5M_MULTIPLIER +
+    cacheCreation1hTokens * rates.inputPerMillion * CACHE_CREATION_1H_MULTIPLIER +
+    outputTokens * rates.outputPerMillion;
+
+  if (!Number.isFinite(unscaledCostUsd)) {
+    throw new Error('estimateCostUsd: calculated cost must remain finite');
+  }
+
+  const costUsd = unscaledCostUsd / 1_000_000;
+  if (!Number.isFinite(costUsd)) {
+    throw new Error('estimateCostUsd: calculated cost must remain finite');
+  }
 
   return roundToMicroDollar(costUsd);
+}
+
+function assertRate(field: keyof ModelRates, value: number): void {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
+    throw new Error(`estimateCostUsd: rates.${field} must be a non-negative finite number`);
+  }
+}
+
+function tokenCountOrZero(usage: UsageTokens, field: keyof UsageTokens): number {
+  const value = usage[field];
+  if (value === undefined) {
+    return 0;
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`estimateCostUsd: usage.${field} must be a non-negative safe integer`);
+  }
+  return value;
 }
 
 /** Round to 6 decimal places (micro-dollar precision) — enough resolution for
  * per-call cost tracking without accumulating floating-point noise across
  * many summed calls. */
 function roundToMicroDollar(usd: number): number {
-  return Math.round(usd * 1e6) / 1e6;
+  const roundedUsd = Math.round(usd * 1e6) / 1e6;
+  if (!Number.isFinite(roundedUsd)) {
+    throw new Error('estimateCostUsd: rounded cost must remain finite');
+  }
+  return roundedUsd;
 }
 
 /**

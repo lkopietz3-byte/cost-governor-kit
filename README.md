@@ -70,6 +70,20 @@ and the buggy-collapsed cost for the same usage and asserts they differ by
 You bring your own pricing table — this library ships no hardcoded model
 prices (see the ceiling section below for why).
 
+`estimateCostUsd` validates this public boundary before doing cost math. Rates
+must be finite, non-negative numbers, and each supplied token bucket must be a
+non-negative safe integer. Omitted or explicitly `undefined` buckets still
+default to zero; explicit `null` and other malformed values throw. Calculations
+that overflow finite arithmetic also throw. This is a runtime compatibility
+change: fractional token counts, integers outside JavaScript's safe-integer
+range, and explicit `null` values were previously accepted by the arithmetic
+and now throw, as do negative, nonnumeric, and non-finite inputs.
+
+Callers that project usage from a fractional value such as a running average
+must migrate that estimate to whole tokens before calling the estimator or
+ceiling guard. Round each projected bucket up for a conservative cost estimate,
+then ensure it remains within the non-negative safe-integer range.
+
 ---
 
 ## 2. Pre-call dollar ceiling (`src/preCallCeiling.ts`)

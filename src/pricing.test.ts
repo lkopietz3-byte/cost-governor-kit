@@ -13,6 +13,31 @@ import {
 // Toy rates — deliberately round numbers so expected costs are easy to hand-check.
 const rates: ModelRates = { inputPerMillion: 3, outputPerMillion: 15 };
 
+const tokenBucketNames = [
+  'inputTokens',
+  'outputTokens',
+  'cacheReadTokens',
+  'cacheCreation5mTokens',
+  'cacheCreation1hTokens',
+] as const;
+
+const invalidTokenValues: ReadonlyArray<readonly [string, number]> = [
+  ['negative', -1],
+  ['fractional', 0.5],
+  ['NaN', Number.NaN],
+  ['positive infinity', Number.POSITIVE_INFINITY],
+  ['negative infinity', Number.NEGATIVE_INFINITY],
+  ['unsafe integer', Number.MAX_SAFE_INTEGER + 1],
+];
+
+const rateNames = ['inputPerMillion', 'outputPerMillion'] as const;
+const invalidRateValues: ReadonlyArray<readonly [string, number]> = [
+  ['negative', -1],
+  ['NaN', Number.NaN],
+  ['positive infinity', Number.POSITIVE_INFINITY],
+  ['negative infinity', Number.NEGATIVE_INFINITY],
+];
+
 describe('estimateCostUsd — basic input/output', () => {
   it('prices plain uncached input and output at the base rates', () => {
     const cost = estimateCostUsd(rates, { inputTokens: 1_000_000, outputTokens: 1_000_000 });
@@ -21,6 +46,106 @@ describe('estimateCostUsd — basic input/output', () => {
 
   it('treats missing fields as zero', () => {
     expect(estimateCostUsd(rates, {})).toBe(0);
+  });
+
+  it('preserves the inherited result for the independently reviewed large input', () => {
+    expect(
+      estimateCostUsd(
+        { inputPerMillion: 32.41542859468609, outputPerMillion: 84.89569439552724 },
+        {
+          inputTokens: 836_287_760,
+          outputTokens: 108_828_860,
+          cacheReadTokens: 202_490_199,
+          cacheCreation5mTokens: 73_905_380,
+          cacheCreation1hTokens: 981_670_132,
+        },
+      ),
+    ).toBe(103_641.217812);
+  });
+
+  it('preserves multiply-sum-divide rounding for a deterministic operation-order edge', () => {
+    expect(
+      estimateCostUsd(
+        { inputPerMillion: 19.921824941411614, outputPerMillion: 60.61670910567045 },
+        {
+          inputTokens: 669_684_661,
+          outputTokens: 106_113_399,
+          cacheReadTokens: 766_381_311,
+          cacheCreation5mTokens: 199_910_199,
+          cacheCreation1hTokens: 745_939_054,
+        },
+      ),
+    ).toBe(55_999.511541);
+  });
+});
+
+describe('estimateCostUsd — validates its public numeric inputs', () => {
+  describe.each(tokenBucketNames)('%s', (field) => {
+    it.each(invalidTokenValues)('rejects a %s value', (_label, value) => {
+      expect(() => estimateCostUsd(rates, { [field]: value })).toThrow(new RegExp(field));
+    });
+
+    it('rejects an explicitly supplied null value', () => {
+      expect(() =>
+        estimateCostUsd(rates, { [field]: null } as unknown as Parameters<typeof estimateCostUsd>[1]),
+      ).toThrow(new RegExp(field));
+    });
+  });
+
+  describe.each(rateNames)('%s', (field) => {
+    it.each(invalidRateValues)('rejects a %s value', (_label, value) => {
+      expect(() => estimateCostUsd({ ...rates, [field]: value }, {})).toThrow(new RegExp(field));
+    });
+  });
+
+  it('rejects non-numeric values without echoing them in errors', () => {
+    expect(() =>
+      estimateCostUsd({ ...rates, inputPerMillion: 'private-rate' as unknown as number }, {}),
+    ).toThrowError('estimateCostUsd: rates.inputPerMillion must be a non-negative finite number');
+    expect(() =>
+      estimateCostUsd(rates, { inputTokens: 'private-token-value' as unknown as number }),
+    ).toThrowError('estimateCostUsd: usage.inputTokens must be a non-negative safe integer');
+  });
+
+  it('treats an explicitly undefined token bucket as the documented zero default', () => {
+    expect(estimateCostUsd(rates, { inputTokens: undefined })).toBe(0);
+  });
+
+  it('accepts zero token counts and non-negative decimal rates', () => {
+    expect(
+      estimateCostUsd(
+        { inputPerMillion: 0.25, outputPerMillion: 1.5 },
+        {
+          inputTokens: 4_000_000,
+          outputTokens: 2_000_000,
+          cacheReadTokens: 0,
+          cacheCreation5mTokens: 0,
+          cacheCreation1hTokens: 0,
+        },
+      ),
+    ).toBe(4);
+  });
+
+  it('accepts the largest safe integer token count', () => {
+    expect(() =>
+      estimateCostUsd(
+        { inputPerMillion: 0, outputPerMillion: 0 },
+        { inputTokens: Number.MAX_SAFE_INTEGER },
+      ),
+    ).not.toThrow();
+  });
+
+  it('rejects a cost calculation that overflows finite arithmetic', () => {
+    expect(() =>
+      estimateCostUsd(
+        { inputPerMillion: Number.MAX_VALUE, outputPerMillion: 0 },
+        { inputTokens: Number.MAX_SAFE_INTEGER },
+      ),
+    ).toThrow(/finite.*cost|cost.*finite/i);
+  });
+
+  it('rejects the reproduced negative-output-token cost bypass', () => {
+    expect(() => estimateCostUsd(rates, { outputTokens: -1_000_000 })).toThrow(/outputTokens/);
   });
 });
 

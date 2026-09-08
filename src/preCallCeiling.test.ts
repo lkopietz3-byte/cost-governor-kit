@@ -20,12 +20,14 @@ describe('checkPreCallCeiling — allows calls under the ceiling', () => {
   });
 
   it('allows a call that lands exactly on the ceiling', () => {
+    // The original fixture used a fractional token count to produce a $1 call.
+    // Integer tokens at a $1/M rate preserve the same exact-ceiling guarantee
+    // while honoring UsageTokens' non-negative-safe-integer contract.
     const result = checkPreCallCeiling({
       spentSoFarUsd: 4,
       ceilingUsd: 5,
-      // (0 in + outputTokens*15)/1e6 == 1 exactly when outputTokens = 66_666.67 → use input instead for a clean number
-      estimatedNextCallUsage: { inputTokens: 1_000_000 / 3 },
-      rates,
+      estimatedNextCallUsage: { inputTokens: 1_000_000 },
+      rates: { inputPerMillion: 1, outputPerMillion: 15 },
     });
     expect(result.projectedTotalUsd).toBeCloseTo(5, 6);
     expect(result.allowed).toBe(true);
@@ -101,5 +103,90 @@ describe('checkPreCallCeiling — rates must be explicit, never defaulted', () =
         rates,
       }),
     ).toThrow(/ceilingUsd/);
+  });
+});
+
+describe('checkPreCallCeiling — invalid estimates fail closed', () => {
+  it('rejects the reproduced negative-input-rate bypass before returning allowed', () => {
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 0,
+        estimatedNextCallUsage: { inputTokens: 1_000_000 },
+        rates: { inputPerMillion: -3, outputPerMillion: 15 },
+      }),
+    ).toThrow(/inputPerMillion/);
+  });
+
+  it('rejects the reproduced negative-input-token bypass before returning allowed', () => {
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 4,
+        ceilingUsd: 5,
+        estimatedNextCallUsage: { inputTokens: -1_000_000 },
+        rates,
+      }),
+    ).toThrow(/inputTokens/);
+  });
+
+  it.each([
+    'inputTokens',
+    'outputTokens',
+    'cacheReadTokens',
+    'cacheCreation5mTokens',
+    'cacheCreation1hTokens',
+  ] as const)('rejects a negative %s estimate', (field) => {
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 5,
+        estimatedNextCallUsage: { [field]: -1 },
+        rates,
+      }),
+    ).toThrow(new RegExp(field));
+  });
+
+  it.each([
+    ['fractional', 0.5],
+    ['NaN', Number.NaN],
+    ['positive infinity', Number.POSITIVE_INFINITY],
+    ['negative infinity', Number.NEGATIVE_INFINITY],
+    ['unsafe integer', Number.MAX_SAFE_INTEGER + 1],
+  ] as const)('rejects a %s token estimate', (_label, inputTokens) => {
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 5,
+        estimatedNextCallUsage: { inputTokens },
+        rates,
+      }),
+    ).toThrow(/inputTokens/);
+  });
+
+  it.each(['inputPerMillion', 'outputPerMillion'] as const)(
+    'rejects invalid %s rates',
+    (field) => {
+      for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+        expect(() =>
+          checkPreCallCeiling({
+            spentSoFarUsd: 0,
+            ceilingUsd: 5,
+            estimatedNextCallUsage: {},
+            rates: { ...rates, [field]: value },
+          }),
+        ).toThrow(new RegExp(field));
+      }
+    },
+  );
+
+  it('rejects projected-total rounding that overflows finite arithmetic', () => {
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: Number.MAX_VALUE,
+        ceilingUsd: Number.MAX_VALUE,
+        estimatedNextCallUsage: {},
+        rates,
+      }),
+    ).toThrow(/rounded projected total.*finite/i);
   });
 });

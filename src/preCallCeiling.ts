@@ -44,9 +44,12 @@ export interface PreCallCeilingCheck {
   ceilingUsd: number;
   /** Estimated token usage for the call about to be made — NOT actual usage,
    * since this check runs before the call. Estimate however you like (a
-   * fixed per-record heuristic, a tokenizer count, a running average of
-   * recent calls); accuracy of this estimate bounds the accuracy of the
-   * ceiling (see the README's Limits section). */
+    * fixed per-record heuristic, a tokenizer count, a running average of
+    * recent calls); accuracy of this estimate bounds the accuracy of the
+   * ceiling (see the README's Limits section). Convert fractional projections
+   * such as averages conservatively by rounding each bucket up to a whole
+   * token, and ensure the result is a non-negative safe integer. This function
+   * validates the supplied buckets and rejects values outside that contract. */
   estimatedNextCallUsage: UsageTokens;
   /**
    * Live rates for the model about to be called. REQUIRED — there is no
@@ -98,10 +101,12 @@ export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingR
     typeof check.rates.inputPerMillion !== 'number' ||
     typeof check.rates.outputPerMillion !== 'number' ||
     !Number.isFinite(check.rates.inputPerMillion) ||
-    !Number.isFinite(check.rates.outputPerMillion)
+    !Number.isFinite(check.rates.outputPerMillion) ||
+    check.rates.inputPerMillion < 0 ||
+    check.rates.outputPerMillion < 0
   ) {
     throw new Error(
-      'checkPreCallCeiling: `rates` (with numeric inputPerMillion/outputPerMillion) is required. ' +
+      'checkPreCallCeiling: `rates` (with non-negative finite numeric inputPerMillion/outputPerMillion) is required. ' +
         'This library never defaults or hardcodes a price — pass the live rate explicitly, ' +
         'the same way classify-batch.mjs takes --input-rate/--output-rate as CLI arguments, ' +
         'so a stale price cannot silently corrupt the spend cap.',
@@ -115,7 +120,11 @@ export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingR
   }
 
   const projectedNextCallCostUsd = estimateCostUsd(check.rates, check.estimatedNextCallUsage);
-  const projectedTotalUsd = round6(check.spentSoFarUsd + projectedNextCallCostUsd);
+  const unroundedProjectedTotalUsd = check.spentSoFarUsd + projectedNextCallCostUsd;
+  if (!Number.isFinite(unroundedProjectedTotalUsd)) {
+    throw new Error('checkPreCallCeiling: projected total must remain finite');
+  }
+  const projectedTotalUsd = round6(unroundedProjectedTotalUsd);
   const allowed = projectedTotalUsd <= check.ceilingUsd;
 
   return {
@@ -132,5 +141,9 @@ export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingR
 }
 
 function round6(n: number): number {
-  return Math.round(n * 1e6) / 1e6;
+  const rounded = Math.round(n * 1e6) / 1e6;
+  if (!Number.isFinite(rounded)) {
+    throw new Error('checkPreCallCeiling: rounded projected total must remain finite');
+  }
+  return rounded;
 }
