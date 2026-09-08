@@ -11,7 +11,9 @@ The legacy usage helper is advisory under concurrency. Strict reservation correc
 Use Node 26.3.0 and the committed lockfile on Linux or macOS. No credentials, provider calls or database are required by these checks. Run sequentially from the repository root:
 
 ```sh
-npm ci
+npm ci --no-audit
+npm run audit:dependencies
+npm run lint
 npm run typecheck
 npm test -- --maxWorkers=1 --minWorkers=1
 npm run build
@@ -20,9 +22,13 @@ npm run verify:package
 
 `verify:package` requires the preceding build. It packs the actual exports, installs the tarball into a fresh temporary consumer offline with lifecycle scripts disabled, then checks runtime root/subpath imports, representative denial behavior and strict NodeNext declarations. It prints the evidence directory and successful tarball hash; temporary evidence is retained for inspection. This proves the package boundary with synthetic inputs, not provider billing or live concurrency behavior.
 
-The **Library tests and package** job runs on every PR, main push and manual request using a clean Ubuntu runner. Errors stop the affected step/job; no advisory fallback is allowed. Actions use reviewed commit pins and weekly Actions-only Dependabot updates. This does not establish that branch protection or npm security alerts are enabled. Pin updates must preserve the same check name and be verified before integration.
+The **Library tests and package** job runs on every PR, main push and manual request using a clean Ubuntu runner. Errors stop the affected step/job; no advisory fallback is allowed. Actions use reviewed commit pins and weekly Actions and npm Dependabot update proposals. Review toolchain compatibility and supported version lines before accepting updates; no update is automatically merged. This does not establish that branch protection or npm security alerts are enabled. Pin updates must preserve the same check name and be verified before integration.
 
-Source lint is currently **NOT_RUN: no source linter is declared**. Typecheck, syntax checks and a build do not substitute for lint. Configuring and validating a suitable source lint gate remains an owned prerequisite for whole-repository/release readiness. Workflow-specific lint and package tests do not close that gap.
+Source lint covers every TypeScript implementation/test file, Node ESM verification script and the lint config, using stable recommended correctness and type-aware rules with zero warnings. The only test-specific rule adjustment permits async functions without await: in-memory ledger doubles deliberately implement promised interfaces, including rejected-promise and scheduling semantics. Promise misuse and floating-promise checks still apply to tests. No source suppression is required. Typecheck remains separate.
+
+The dependency audit includes development tooling and blocks on every reported severity; an unavailable advisory service is a failed check, not a clean security result. A clean audit covers known advisories at the time of the run, not all vulnerabilities. Vitest 3.2.7 and Vite 6.4.3 are exact development pins for the smallest compatible security repair; Vite 6.4 receives security backports. Review these support boundaries during updates. The package still declares no runtime dependencies.
+
+Gate definitions are not pass evidence. Record each actual run against the final revision before claiming these checks are verified.
 
 ## Review and release
 

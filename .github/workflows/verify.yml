@@ -31,7 +31,11 @@ jobs:
           node-version: '26.3.0'
           cache: npm
       - name: Install locked dependencies
-        run: npm ci
+        run: npm ci --no-audit
+      - name: Audit all locked dependencies
+        run: npm run audit:dependencies
+      - name: Lint source and verifier
+        run: npm run lint
       - name: Typecheck source and tests
         run: npm run typecheck
       - name: Run all library tests
