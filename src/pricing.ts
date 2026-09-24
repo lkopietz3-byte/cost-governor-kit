@@ -167,7 +167,9 @@ export function formatRatesForLog(rates: ModelRates): string {
  * substitutes a "close enough" price for an unrecognized model defeats the
  * entire point of computing an exact ceiling — fail loudly instead. */
 export function getRatesOrThrow(table: PricingTable, model: string): ModelRates {
-  const rates = table[model];
+  // Own keys only: a plain-object table inherits `constructor`, `toString`,
+  // `__proto__` and friends, which must never be returned as "rates".
+  const rates = Object.hasOwn(table, model) ? table[model] : undefined;
   if (!rates) {
     const known = Object.keys(table).join(', ') || '(empty table)';
     throw new Error(

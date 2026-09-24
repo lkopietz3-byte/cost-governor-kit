@@ -224,4 +224,21 @@ describe('getRatesOrThrow', () => {
   it('throws — never silently defaults — for an unknown model', () => {
     expect(() => getRatesOrThrow(table, 'unknown-model')).toThrow(/no pricing entry/i);
   });
+
+  it.each(['__proto__', 'constructor', 'toString', 'hasOwnProperty', 'valueOf'])(
+    'throws for the inherited Object member name %s instead of returning it as rates',
+    (model) => {
+      expect(() => getRatesOrThrow(table, model)).toThrow(/no pricing entry/i);
+    },
+  );
+
+  it('lists "(empty table)" when the table has no entries', () => {
+    expect(() => getRatesOrThrow({}, 'any-model')).toThrow(/Known models: \(empty table\)/);
+  });
+
+  it('works with a table that has no prototype', () => {
+    const bare = Object.assign(Object.create(null) as PricingTable, { 'toy-model-a': rates });
+    expect(getRatesOrThrow(bare, 'toy-model-a')).toBe(rates);
+    expect(() => getRatesOrThrow(bare, 'toy-model-b')).toThrow(/no pricing entry/i);
+  });
 });
