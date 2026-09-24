@@ -1,0 +1,28 @@
+{
+  "cost-governor-kit": [
+    "CACHE_CREATION_1H_MULTIPLIER",
+    "CACHE_CREATION_5M_MULTIPLIER",
+    "CACHE_READ_MULTIPLIER",
+    "checkPreCallCeiling",
+    "estimateCostUsd",
+    "formatRatesForLog",
+    "getRatesOrThrow",
+    "withCapacityReservation",
+    "withReserveConfirm"
+  ],
+  "cost-governor-kit/pricing": [
+    "CACHE_CREATION_1H_MULTIPLIER",
+    "CACHE_CREATION_5M_MULTIPLIER",
+    "CACHE_READ_MULTIPLIER",
+    "estimateCostUsd",
+    "formatRatesForLog",
+    "getRatesOrThrow"
+  ],
+  "cost-governor-kit/preCallCeiling": [
+    "checkPreCallCeiling"
+  ],
+  "cost-governor-kit/reserveConfirm": [
+    "withCapacityReservation",
+    "withReserveConfirm"
+  ]
+}

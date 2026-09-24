@@ -2,8 +2,18 @@
   "name": "cost-governor-kit",
   "version": "0.1.0",
   "description": "Three cost-safety properties every AI-calling app should have, assembled into one library: a pre-call dollar ceiling with live caller-supplied rates, correct cache-aware pricing math, and a reserve-then-confirm atomic usage-counting contract.",
-  "type": "module",
+  "keywords": [],
+  "author": "Lucas Kopietz",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lkopietz3-byte/cost-governor-kit.git"
+  },
+  "homepage": "https://github.com/lkopietz3-byte/cost-governor-kit#readme",
+  "bugs": {
+    "url": "https://github.com/lkopietz3-byte/cost-governor-kit/issues"
+  },
+  "type": "module",
   "private": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -29,27 +39,33 @@
   "sideEffects": false,
   "files": [
     "dist",
-    "src",
     "reference-impl",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
   ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "verify:package": "node scripts/verify-package.mjs",
-    "lint": "eslint src scripts eslint.config.mjs --max-warnings=0",
-    "audit:dependencies": "npm audit --package-lock-only --include=dev --ignore-scripts --audit-level=low"
+    "lint": "eslint . --max-warnings=0",
+    "audit:dependencies": "npm audit --package-lock-only --include=dev --ignore-scripts --audit-level=low",
+    "prepare": "npm run build",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build && npm run verify:package"
   },
   "dependencies": {},
   "devDependencies": {
-    "typescript": "^5.6.3",
-    "vitest": "3.2.7",
-    "vite": "6.4.3",
-    "eslint": "10.9.1",
     "@eslint/js": "10.0.1",
+    "eslint": "10.9.1",
+    "globals": "17.12.0",
+    "typescript": "^5.6.3",
     "typescript-eslint": "8.70.0",
-    "globals": "17.12.0"
+    "vite": "7.3.6",
+    "vitest": "4.1.11"
   }
 }

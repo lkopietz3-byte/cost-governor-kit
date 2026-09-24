@@ -7,34 +7,29 @@ import tseslint from 'typescript-eslint';
 
 export default defineConfig(
   {
-    name: 'cost-governor/linter-controls',
-    linterOptions: {
-      reportUnusedDisableDirectives: 'error',
-    },
+    name: 'kit/linter-controls',
+    ignores: ['dist/**', 'coverage/**'],
+    linterOptions: { reportUnusedDisableDirectives: 'error' },
   },
   {
-    name: 'cost-governor/typescript',
-    files: ['src/**/*.ts'],
+    name: 'kit/typescript',
+    files: ['src/**/*.ts', 'test/**/*.ts'],
     extends: [js.configs.recommended, tseslint.configs.recommendedTypeChecked],
     languageOptions: {
-      parserOptions: {
-        projectService: true,
-        tsconfigRootDir: import.meta.dirname,
-      },
+      parserOptions: { projectService: true, tsconfigRootDir: import.meta.dirname },
     },
   },
   {
-    name: 'cost-governor/async-test-contracts',
-    files: ['src/**/*.test.ts'],
+    name: 'kit/async-test-doubles',
+    files: ['src/**/*.test.ts', 'test/**/*.ts'],
     rules: {
-      // In-memory doubles intentionally implement async interfaces. Keeping async
-      // preserves rejected-promise and scheduling behavior in concurrency tests.
+      // In-memory doubles implement async interfaces on purpose.
       '@typescript-eslint/require-await': 'off',
     },
   },
   {
-    name: 'cost-governor/node-esm',
-    files: ['scripts/**/*.mjs', 'eslint.config.mjs'],
+    name: 'kit/node-esm-scripts',
+    files: ['scripts/**/*.mjs', 'examples/**/*.mjs', 'eslint.config.mjs'],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 'latest',
