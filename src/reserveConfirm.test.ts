@@ -495,3 +495,446 @@ describe('withCapacityReservation — strict concurrent capacity lifecycle', () 
     expect(failedLedger.active.size).toBe(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Adversarial interleavings. These pin down what the HELPERS guarantee.
+// Where a test uses an in-memory double, it illustrates the adapter contract;
+// it does not prove any real storage adapter.
+// ---------------------------------------------------------------------------
+
+// Yield to other pending promise callbacks (no timers: the test lib has no DOM/Node types).
+const tick = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
+};
+const futureIso = (ms = 60_000) => new Date(Date.now() + ms).toISOString();
+
+/** A double that counts only unexpired holds, with its own injectable clock. */
+class ExpiringCapacityLedger extends FakeCapacityLedger {
+  nowMs = Date.now();
+  constructor(private readonly nonAtomic = false) {
+    super();
+  }
+
+  override async reserveCapacity(request: ReserveCapacityRequest) {
+    this.reserveCalls.push(request);
+    const operationKey = `${request.key}\u0000${request.operationId}`;
+    const existing = this.operations.get(operationKey);
+    if (existing?.status === 'active') return { status: 'operation_in_progress' as const, reservation: existing.reservation };
+    if (existing?.status === 'terminal') {
+      return { status: 'operation_terminal' as const, operationId: request.operationId, reason: existing.reason };
+    }
+    const unexpiredHolds = [...this.active.values()].filter(
+      (r) => r.key === request.key && Date.parse(r.expiresAt) > this.nowMs,
+    ).length;
+    const used = (this.confirmed.get(request.key) ?? 0) + unexpiredHolds;
+    if (this.nonAtomic) await tick(); // read, yield, then write: a check-then-act race
+    if (used >= request.limit) return { status: 'denied' as const, reason: 'capacity exhausted' };
+    const reservation: CapacityReservation = {
+      id: `r-${this.nextId++}`,
+      key: request.key,
+      operationId: request.operationId,
+      expiresAt: new Date(Math.max(this.nowMs, Date.now()) + 60_000).toISOString(),
+    };
+    this.active.set(reservation.id, reservation);
+    this.operations.set(operationKey, { status: 'active', reservation });
+    return { status: 'acquired' as const, reservation };
+  }
+}
+
+function countingWork(counter: { calls: number }, value = 'paid') {
+  return async () => {
+    counter.calls++;
+    await tick();
+    return { status: 'succeeded' as const, value };
+  };
+}
+
+describe('withCapacityReservation — concurrency is the adapter\'s job', () => {
+  it('with an atomic adapter, 10 concurrent requests at limit 3 run the provider exactly 3 times', async () => {
+    const ledger = new ExpiringCapacityLedger();
+    const provider = { calls: 0 };
+    const results = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        withCapacityReservation(ledger, { key: 'user-1', limit: 3, operationId: `op-${i}` }, countingWork(provider)),
+      ),
+    );
+    expect(provider.calls).toBe(3);
+    expect(results.filter((r) => r.status === 'confirmed')).toHaveLength(3);
+    expect(results.filter((r) => r.status === 'denied')).toHaveLength(7);
+    expect(ledger.confirmed.get('user-1')).toBe(3);
+  });
+
+  it('with a NON-atomic adapter the helper cannot prevent overselling: all 10 run', async () => {
+    // The helper has no counter of its own; it trusts the adapter's decision.
+    const ledger = new ExpiringCapacityLedger(true);
+    const provider = { calls: 0 };
+    await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        withCapacityReservation(ledger, { key: 'user-1', limit: 3, operationId: `op-${i}` }, countingWork(provider)),
+      ),
+    );
+    expect(provider.calls).toBe(10);
+  });
+
+  it('five concurrent calls with the same operationId run the provider once', async () => {
+    const ledger = new ExpiringCapacityLedger();
+    const provider = { calls: 0 };
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        withCapacityReservation(ledger, { key: 'user-1', limit: 3, operationId: 'same-op' }, countingWork(provider)),
+      ),
+    );
+    expect(provider.calls).toBe(1);
+    expect(results.map((r) => r.status).sort()).toEqual([
+      'confirmed',
+      'operation_in_progress',
+      'operation_in_progress',
+      'operation_in_progress',
+      'operation_in_progress',
+    ]);
+  });
+
+  it('passes limit 0 to the adapter and does not enforce it locally', async () => {
+    const provider = { calls: 0 };
+    const conforming = new ExpiringCapacityLedger();
+    const denied = await withCapacityReservation(conforming, { key: 'u', limit: 0, operationId: 'a' }, countingWork(provider));
+    expect(denied.status).toBe('denied');
+    expect(conforming.reserveCalls[0]?.limit).toBe(0);
+
+    const ignoresLimit: CapacityReservationLedger = {
+      reserveCapacity: async (request) => ({
+        status: 'acquired',
+        reservation: { id: 'x', key: request.key, operationId: request.operationId, expiresAt: futureIso() },
+      }),
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    const ran = await withCapacityReservation(ignoresLimit, { key: 'u', limit: 0, operationId: 'a' }, countingWork(provider));
+    expect(ran.status).toBe('confirmed');
+    expect(provider.calls).toBe(1);
+  });
+});
+
+describe('withCapacityReservation — each ledger method is called at most once, never both', () => {
+  function spyLedger(): CapacityReservationLedger & { log: string[] } {
+    const log: string[] = [];
+    return {
+      log,
+      reserveCapacity: async (request) => {
+        log.push('reserve');
+        return {
+          status: 'acquired',
+          reservation: { id: 'r-1', key: request.key, operationId: request.operationId, expiresAt: futureIso() },
+        };
+      },
+      confirmReservation: async () => {
+        log.push('confirm');
+      },
+      releaseReservation: async () => {
+        log.push('release');
+      },
+    };
+  }
+  const request = { key: 'user-1', limit: 1, operationId: 'op-1' };
+
+  it('success: reserve, work, confirm', async () => {
+    const ledger = spyLedger();
+    await withCapacityReservation(ledger, request, async () => {
+      ledger.log.push('work');
+      return { status: 'succeeded', value: 1 };
+    });
+    expect(ledger.log).toEqual(['reserve', 'work', 'confirm']);
+  });
+
+  it('known failure: reserve, work, release', async () => {
+    const ledger = spyLedger();
+    const result = await withCapacityReservation(ledger, request, async () => {
+      ledger.log.push('work');
+      return { status: 'failed', error: new Error('rejected before charging') };
+    });
+    expect(ledger.log).toEqual(['reserve', 'work', 'release']);
+    expect(result).toMatchObject({ status: 'released_after_failure', error: new Error('rejected before charging') });
+  });
+
+  it('a synchronous throw from doTheWork is ambiguous: no confirm, no release', async () => {
+    const ledger = spyLedger();
+    const result = await withCapacityReservation(ledger, request, () => {
+      ledger.log.push('work');
+      throw new Error('sync failure');
+    });
+    expect(ledger.log).toEqual(['reserve', 'work']);
+    expect(result).toMatchObject({ status: 'work_outcome_ambiguous', error: new Error('sync failure') });
+  });
+
+  it('a non-object outcome is ambiguous: no confirm, no release', async () => {
+    const ledger = spyLedger();
+    const result = await withCapacityReservation(ledger, request, async () => 'done' as never);
+    expect(ledger.log).toEqual(['reserve']);
+    expect(result.status).toBe('work_outcome_ambiguous');
+  });
+
+  it('confirmation failure: confirm is attempted once and never followed by release', async () => {
+    const ledger = spyLedger();
+    ledger.confirmReservation = async () => {
+      ledger.log.push('confirm');
+      throw new Error('ledger down');
+    };
+    const result = await withCapacityReservation(ledger, request, async () => ({ status: 'succeeded', value: 'v' }));
+    expect(ledger.log).toEqual(['reserve', 'confirm']);
+    expect(result).toMatchObject({ status: 'confirmation_failed', value: 'v', error: new Error('ledger down') });
+  });
+
+  it('release failure reports both errors and does not retry', async () => {
+    const ledger = spyLedger();
+    ledger.releaseReservation = async () => {
+      ledger.log.push('release');
+      throw new Error('release down');
+    };
+    const result = await withCapacityReservation(ledger, request, async () => ({ status: 'failed', error: 'no charge' }));
+    expect(ledger.log).toEqual(['reserve', 'release']);
+    expect(result).toMatchObject({ status: 'release_failed', workError: 'no charge', releaseError: new Error('release down') });
+  });
+});
+
+describe('withCapacityReservation — adapter errors and malformed decisions', () => {
+  const request = { key: 'user-1', limit: 1, operationId: 'op-1' };
+  const neverRun = { calls: 0 };
+
+  it('propagates a rejected reserveCapacity and runs no work', async () => {
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async () => {
+        throw new Error('db timeout');
+      },
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow('db timeout');
+    expect(neverRun.calls).toBe(0);
+  });
+
+  it.each([
+    ['null', null],
+    ['a string', 'acquired'],
+    ['an object without status', { reservation: {} }],
+  ])('throws for a %s decision', async (_label, decision) => {
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async () => decision as never,
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(
+      'adapter returned an invalid reservation decision',
+    );
+    expect(neverRun.calls).toBe(0);
+  });
+
+  it('passes a denial reason through, and allows a denial without one', async () => {
+    const withReason: CapacityReservationLedger = {
+      reserveCapacity: async () => ({ status: 'denied', reason: 'daily cap' }),
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    await expect(withCapacityReservation(withReason, request, countingWork(neverRun))).resolves.toEqual({
+      status: 'denied',
+      reason: 'daily cap',
+    });
+    const noReason: CapacityReservationLedger = { ...withReason, reserveCapacity: async () => ({ status: 'denied' }) };
+    await expect(withCapacityReservation(noReason, request, countingWork(neverRun))).resolves.toMatchObject({ status: 'denied' });
+    expect(neverRun.calls).toBe(0);
+  });
+
+  it.each([
+    ['key', { key: 'other-user' }, 'reservation key does not match request'],
+    ['operationId', { operationId: 'other-op' }, 'reservation operationId does not match request'],
+    ['expiresAt', { expiresAt: 'soon' }, 'reservation expiresAt must be a valid ISO-8601 timestamp'],
+  ])('throws for an in-progress hold with a mismatched %s', async (_label, patch, message) => {
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async () => ({
+        status: 'operation_in_progress',
+        reservation: { id: 'r-1', key: 'user-1', operationId: 'op-1', expiresAt: futureIso(), ...patch },
+      }),
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(message);
+  });
+
+  it('throws for a terminal decision about a different operation', async () => {
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async () => ({ status: 'operation_terminal', operationId: 'op-2' }),
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(
+      'adapter terminal decision operationId does not match request',
+    );
+  });
+
+  it('an acquired-but-malformed hold throws before work and is NOT released by the helper', async () => {
+    const ledger = new ExpiringCapacityLedger();
+    const original = ledger.reserveCapacity.bind(ledger);
+    ledger.reserveCapacity = async (req) => {
+      const decision = await original(req);
+      if (decision.status === 'acquired') decision.reservation.expiresAt = new Date(Date.now() - 1).toISOString();
+      return decision;
+    };
+    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(
+      'adapter returned an expired reservation',
+    );
+    expect(neverRun.calls).toBe(0);
+    expect(ledger.releaseCalls).toEqual([]);
+    expect(ledger.active.size).toBe(1); // the hold stays until your reconciliation handles it
+    const retry = await withCapacityReservation(ledger, request, countingWork(neverRun));
+    expect(retry.status).toBe('operation_in_progress');
+  });
+});
+
+describe('withCapacityReservation — request validation', () => {
+  const ledger = new FakeCapacityLedger();
+  const work = async () => ({ status: 'succeeded' as const, value: 'must-not-run' });
+
+  it.each([
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['-Infinity', Number.NEGATIVE_INFINITY],
+    ['MAX_SAFE_INTEGER + 1', Number.MAX_SAFE_INTEGER + 1],
+    ['a numeric string', '3' as unknown as number],
+    ['null', null as unknown as number],
+  ])('rejects a %s limit before calling the adapter', async (_label, limit) => {
+    await expect(withCapacityReservation(ledger, { key: 'u', limit, operationId: 'a' }, work)).rejects.toThrow(
+      'limit must be a non-negative safe integer',
+    );
+  });
+
+  it('accepts limit 0 and MAX_SAFE_INTEGER', async () => {
+    await expect(withCapacityReservation(ledger, { key: 'u0', limit: 0, operationId: 'a' }, work)).resolves.toMatchObject({
+      status: 'denied',
+    });
+    await expect(
+      withCapacityReservation(ledger, { key: 'umax', limit: Number.MAX_SAFE_INTEGER, operationId: 'a' }, work),
+    ).resolves.toMatchObject({ status: 'confirmed' });
+  });
+
+  it.each(['', '   '])('rejects the key %j', async (key) => {
+    await expect(withCapacityReservation(ledger, { key, limit: 1, operationId: 'a' }, work)).rejects.toThrow(
+      'key must be a non-empty string',
+    );
+  });
+
+  it('never calls the adapter for a rejected request', () => {
+    expect(ledger.reserveCalls.map((r) => r.key)).toEqual(['u0', 'umax']);
+  });
+});
+
+describe('withCapacityReservation — crash between reserve and confirm (contract illustration)', () => {
+  it('a restarted process retrying the same operationId gets operation_in_progress and never re-runs work', async () => {
+    const ledger = new ExpiringCapacityLedger();
+    const request = { key: 'user-1', limit: 1, operationId: 'op-1' };
+
+    // Process A reserved, then died before confirming. Only the adapter's
+    // durable state survives; the helper keeps none.
+    const beforeCrash = await ledger.reserveCapacity(request);
+    expect(beforeCrash.status).toBe('acquired');
+
+    // Process B retries the same logical operation.
+    const provider = { calls: 0 };
+    const retry = await withCapacityReservation(ledger, request, countingWork(provider));
+    expect(retry.status).toBe('operation_in_progress');
+    expect(provider.calls).toBe(0);
+
+    // While unexpired, the orphaned hold still counts toward the limit.
+    const other = await withCapacityReservation(ledger, { ...request, operationId: 'op-2' }, countingWork(provider));
+    expect(other.status).toBe('denied');
+    expect(provider.calls).toBe(0);
+  });
+
+  it('after the orphaned hold expires it stops counting, so unreconciled paid work can exceed the limit', async () => {
+    const ledger = new ExpiringCapacityLedger();
+    const request = { key: 'user-1', limit: 1, operationId: 'op-1' };
+    await ledger.reserveCapacity(request); // process A: reserved, did paid work, crashed before confirm
+
+    ledger.nowMs += 61_000; // the adapter's clock passes the hold's expiry
+    const provider = { calls: 0 };
+    const next = await withCapacityReservation(ledger, { ...request, operationId: 'op-2' }, countingWork(provider));
+    expect(next.status).toBe('confirmed');
+    expect(provider.calls).toBe(1);
+    // op-1 is still unresolved: only reconciliation can confirm or release it.
+    const replay = await withCapacityReservation(ledger, request, countingWork(provider));
+    expect(replay.status).toBe('operation_in_progress');
+    expect(provider.calls).toBe(1);
+  });
+});
+
+describe('withReserveConfirm — advisory behavior, pinned', () => {
+  it('concurrent callers can all pass the read-only check: 10 at limit 3 all run', async () => {
+    const counts = new Map<string, number>();
+    const ledger: UsageLedger = {
+      checkUnderLimit: async (key, limit) => (counts.get(key) ?? 0) < limit,
+      commitUsage: async (key) => {
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+      },
+    };
+    let paid = 0;
+    await Promise.all(
+      Array.from({ length: 10 }, () =>
+        withReserveConfirm(ledger, 'user-1', 3, async () => {
+          paid++;
+          await tick();
+          return 'ok';
+        }),
+      ),
+    );
+    expect(paid).toBe(10);
+    expect(counts.get('user-1')).toBe(10);
+  });
+
+  it('if commitUsage rejects, the helper rejects and the successful paid result is discarded', async () => {
+    let paid = 0;
+    const ledger: UsageLedger = {
+      checkUnderLimit: async () => true,
+      commitUsage: async () => {
+        throw new Error('commit failed');
+      },
+    };
+    await expect(
+      withReserveConfirm(ledger, 'user-1', 5, async () => {
+        paid++;
+        return 'PAID RESULT';
+      }),
+    ).rejects.toThrow('commit failed');
+    expect(paid).toBe(1);
+  });
+
+  it('propagates a rejected checkUnderLimit without calling', async () => {
+    let paid = 0;
+    const ledger: UsageLedger = {
+      checkUnderLimit: async () => {
+        throw new Error('db down');
+      },
+      commitUsage: async () => undefined,
+    };
+    await expect(
+      withReserveConfirm(ledger, 'user-1', 5, async () => {
+        paid++;
+        return 'x';
+      }),
+    ).rejects.toThrow('db down');
+    expect(paid).toBe(0);
+  });
+
+  it('passes key and limit to the ledger unchanged, without validating the limit', async () => {
+    const seen: Array<[string, number]> = [];
+    const ledger: UsageLedger = {
+      checkUnderLimit: async (key, limit) => {
+        seen.push([key, limit]);
+        return false;
+      },
+      commitUsage: async () => undefined,
+    };
+    await withReserveConfirm(ledger, 'k', 0, async () => 'x');
+    await withReserveConfirm(ledger, 'k', Number.NaN, async () => 'x');
+    expect(seen).toEqual([
+      ['k', 0],
+      ['k', Number.NaN],
+    ]);
+  });
+});

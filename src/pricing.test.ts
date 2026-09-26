@@ -239,9 +239,118 @@ describe('estimateCostUsd — proves the real bug is fixed (37.5% under-report)'
   });
 });
 
+describe('cache multiplier constants', () => {
+  it('have the documented values', () => {
+    expect(CACHE_READ_MULTIPLIER).toBe(0.1);
+    expect(CACHE_CREATION_5M_MULTIPLIER).toBe(1.25);
+    expect(CACHE_CREATION_1H_MULTIPLIER).toBe(2);
+  });
+});
+
+// Independent hand calculations. Each expected value is worked out in
+// integer "rate x tokens" units first, then divided by 1,000,000, so the
+// expectation does not reuse the library's own formula.
+describe('estimateCostUsd — hand-calculated examples', () => {
+  it('prices the README example at $0.0195', () => {
+    // input 1,200 x 3 = 3,600; cache read 8,000 x 3 x 0.1 = 2,400;
+    // 5m write 2,000 x 3 x 1.25 = 7,500; 1h write 0; output 400 x 15 = 6,000.
+    // Sum 19,500 / 1,000,000 = 0.0195.
+    expect(
+      estimateCostUsd(rates, {
+        inputTokens: 1_200,
+        outputTokens: 400,
+        cacheReadTokens: 8_000,
+        cacheCreation5mTokens: 2_000,
+        cacheCreation1hTokens: 0,
+      }),
+    ).toBe(0.0195);
+  });
+
+  it('prices all five buckets at once at $0.14625', () => {
+    // rates 5 / 25: input 10,000 x 5 = 50,000; cache read 40,000 x 5 x 0.1 = 20,000;
+    // 5m write 3,000 x 5 x 1.25 = 18,750; 1h write 2,000 x 5 x 2 = 20,000;
+    // output 1,500 x 25 = 37,500. Sum 146,250 / 1,000,000 = 0.14625.
+    expect(
+      estimateCostUsd(
+        { inputPerMillion: 5, outputPerMillion: 25 },
+        {
+          inputTokens: 10_000,
+          cacheReadTokens: 40_000,
+          cacheCreation5mTokens: 3_000,
+          cacheCreation1hTokens: 2_000,
+          outputTokens: 1_500,
+        },
+      ),
+    ).toBe(0.14625);
+  });
+
+  it("matches the token lines of Anthropic's published caching worked example ($0.445)", () => {
+    // Anthropic pricing page (fetched 2026-09-24), cached worked example at
+    // $5 / $25: uncached input 10,000 -> $0.05, cache reads 40,000 -> $0.02,
+    // output 15,000 -> $0.375. Token lines total $0.445.
+    expect(
+      estimateCostUsd(
+        { inputPerMillion: 5, outputPerMillion: 25 },
+        { inputTokens: 10_000, cacheReadTokens: 40_000, outputTokens: 15_000 },
+      ),
+    ).toBe(0.445);
+  });
+
+  it('can price a model with a different cache-read rate by scaling the input rate for that bucket alone', () => {
+    // Documented workaround for models whose cache reads are not 0.1x
+    // (for example 0.025x): price cache reads separately with
+    // inputPerMillion = base x (0.025 / 0.1). 1,000,000 reads at a $10 base
+    // and 0.025x cost $0.25.
+    expect(
+      estimateCostUsd({ inputPerMillion: 10 * 0.25, outputPerMillion: 0 }, { cacheReadTokens: 1_000_000 }),
+    ).toBe(0.25);
+  });
+});
+
+describe('estimateCostUsd — rounding policy (nearest micro-dollar)', () => {
+  const inputOnly = (inputPerMillion: number) => ({ inputPerMillion, outputPerMillion: 0 });
+
+  it('rounds a cost below half a micro-dollar down to $0', () => {
+    expect(estimateCostUsd(inputOnly(0.25), { inputTokens: 1 })).toBe(0); // 0.25 micro-dollars
+    expect(estimateCostUsd(inputOnly(0.4), { inputTokens: 1 })).toBe(0); // 0.4 micro-dollars
+    expect(estimateCostUsd(rates, { cacheReadTokens: 1 })).toBe(0); // 3 x 0.1 = 0.3 micro-dollars
+  });
+
+  it('rounds a cost above half a micro-dollar up', () => {
+    expect(estimateCostUsd(inputOnly(0.6), { inputTokens: 1 })).toBe(0.000001);
+  });
+
+  it('rounds an exact binary half up (Math.round semantics)', () => {
+    expect(estimateCostUsd(inputOnly(0.5), { inputTokens: 1 })).toBe(0.000001);
+    expect(estimateCostUsd(inputOnly(2.5), { inputTokens: 1 })).toBe(0.000003);
+  });
+
+  it('can round a decimal half down, because the arithmetic is binary floating point', () => {
+    // Exact decimal: 50 x 0.29 = 14.5 micro-dollars. In doubles,
+    // 50 * 0.29 === 14.499999999999998, so the result is 14, not 15.
+    expect(50 * 0.29).toBeLessThan(14.5);
+    expect(estimateCostUsd(inputOnly(0.29), { inputTokens: 50 })).toBe(0.000014);
+  });
+
+  it('returns the double nearest a whole number of micro-dollars', () => {
+    const cost = estimateCostUsd(rates, { inputTokens: 10_000, outputTokens: 2_000 });
+    expect(cost).toBe(0.06);
+    expect(Number.isInteger(Math.round(cost * 1e6))).toBe(true);
+    expect(Math.round(cost * 1e6) / 1e6).toBe(cost);
+  });
+});
+
 describe('formatRatesForLog', () => {
   it('renders a human-readable, loggable rate string', () => {
     expect(formatRatesForLog(rates)).toBe('$3/M in, $15/M out');
+  });
+
+  it('prints decimal rates as JavaScript formats them, without rounding', () => {
+    expect(formatRatesForLog({ inputPerMillion: 0.25, outputPerMillion: 1.25 })).toBe('$0.25/M in, $1.25/M out');
+  });
+
+  it('does not validate; an invalid rate is printed so it can be seen', () => {
+    expect(formatRatesForLog({ inputPerMillion: Number.NaN, outputPerMillion: -1 })).toBe('$NaN/M in, $-1/M out');
   });
 });
 
