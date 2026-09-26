@@ -2,98 +2,102 @@
  * preCallCeiling.ts — a hard dollar ceiling enforced BEFORE an API call, not
  * monitored after.
  *
- * Extracted from ~/lattice/scripts/classify-batch.mjs, the only genuine
- * pre-call dollar ceiling found across an audited portfolio of AI-calling
- * apps. Every other app in that audit had post-hoc spend *monitoring*
- * (dashboards, alerts, anomaly detection) — useful, but reactive: by the time
- * an alert fires, the money is already spent. classify-batch.mjs instead
- * computes the projected cost of the NEXT call before making it, and refuses
- * to make the call at all if that would push cumulative spend past a hard
- * ceiling:
+ * Extracted from ~/lattice/scripts/classify-batch.mjs, a batch script in the
+ * author's own projects. Before each batch call it checks cumulative spend
+ * against a hard cap and stops cleanly once the cap is reached:
  *
  *   // Ceiling checked BEFORE the call, not after. This is the whole point.
  *   if (usd(spend) >= MAX_USD) { ...stop cleanly... }
  *
+ * This module goes one step further than that script: it also prices the
+ * next call from an estimate and refuses it if spend so far plus that
+ * estimate would exceed the ceiling.
+ *
  * THE "NEVER A STALE HARDCODED PRICE" DISCIPLINE
  * ------------------------------------------------
- * classify-batch.mjs takes its rates as explicit `--input-rate` / `--output-rate`
- * CLI arguments (never hardcoded) and prints them on every run:
+ * classify-batch.mjs takes its rates as `--input-rate` / `--output-rate` CLI
+ * arguments and prints them on every run:
  *
  *   rates: $3/M in, $15/M out  <- VERIFY against current pricing
  *
- * The reasoning (from that script's own header comment): "Rates are dollars
- * per million tokens and MUST be set to current published pricing. They
- * default to placeholders and are printed on every run so a stale number
- * cannot silently corrupt the spend cap." A hardcoded price baked into a
- * library ships once and rots forever; a rate the caller must supply and the
- * caller can log is a rate someone is forced to look at.
- *
- * This module mirrors that discipline: `rates` is a REQUIRED parameter on
- * every check, with no default value anywhere in this file. See pricing.ts
- * for `formatRatesForLog()`, which callers should log alongside every batch
- * run for the same "stale price can't hide" reason.
+ * From that script's header: "Rates are dollars per million tokens and MUST
+ * be set to current published pricing. They default to placeholders and are
+ * printed on every run so a stale number cannot silently corrupt the spend
+ * cap." This module mirrors that: `rates` is required on every check and
+ * has no default anywhere in this library. Log it with `formatRatesForLog()`.
  */
 
 import { estimateCostUsd, type ModelRates, type UsageTokens } from './pricing.js';
 
+/** Input to {@link checkPreCallCeiling}. */
 export interface PreCallCeilingCheck {
-  /** Cumulative spend already incurred this run/session/day, in USD. */
+  /** Cumulative spend already incurred this run/session/day, in USD. Finite and >= 0. */
   spentSoFarUsd: number;
-  /** The hard dollar ceiling. The call is denied if spentSoFarUsd + the
-   * projected cost of the next call would exceed this. */
+  /**
+   * The hard ceiling in USD. Finite and >= 0. The call is allowed when the
+   * rounded projected total is less than or EQUAL to this value. It is
+   * compared as given (not rounded), so pass whole micro-dollars.
+   */
   ceilingUsd: number;
-  /** Estimated token usage for the call about to be made — NOT actual usage,
-   * since this check runs before the call. Estimate however you like (a
-    * fixed per-record heuristic, a tokenizer count, a running average of
-    * recent calls); accuracy of this estimate bounds the accuracy of the
-   * ceiling (see the README's Limits section). Convert fractional projections
-   * such as averages conservatively by rounding each bucket up to a whole
-   * token, and ensure the result is a non-negative safe integer. This function
-   * validates the supplied buckets and rejects values outside that contract. */
+  /**
+   * Estimated token usage for the call about to be made (not actual usage;
+   * this runs before the call). The ceiling is only as accurate as this
+   * estimate. Round fractional projections, such as averages, up to whole
+   * tokens. Validated exactly like {@link estimateCostUsd}'s `usage`.
+   */
   estimatedNextCallUsage: UsageTokens;
   /**
-   * Live rates for the model about to be called. REQUIRED — there is no
-   * default. Pass the same rates you're about to bill against, ideally
-   * sourced from an explicit CLI flag, config value, or recent pricing
-   * lookup, and log them (see pricing.ts's formatRatesForLog) so a stale
-   * number is visible rather than silently baked in.
+   * Rates for the model about to be called. Required; there is no default.
+   * Source them from a flag, config value or recent pricing lookup and log
+   * them with `formatRatesForLog` so a stale number is visible.
    */
   rates: ModelRates;
 }
 
+/** Output of {@link checkPreCallCeiling}. */
 export interface PreCallCeilingResult {
-  /** True if the call is allowed to proceed. False means: do not make the call. */
+  /** True if the call may proceed. False means: do not make the call. */
   allowed: boolean;
-  /** The estimated cost of the call about to be made, in USD. */
+  /** `estimateCostUsd(rates, estimatedNextCallUsage)`, rounded to the nearest micro-dollar. */
   projectedNextCallCostUsd: number;
-  /** spentSoFarUsd + projectedNextCallCostUsd — what cumulative spend would
-   * become if this call is made. */
+  /** `spentSoFarUsd + projectedNextCallCostUsd`, rounded to the nearest micro-dollar. */
   projectedTotalUsd: number;
-  /** Echoed back from the input for convenience in logging/error messages. */
+  /** Echoed from the input. */
   ceilingUsd: number;
-  /** Present only when allowed is false — a human-readable explanation. */
+  /** Present only when `allowed` is false: a human-readable explanation with the amounts. */
   reason?: string;
 }
 
 /**
- * Decide whether the next call is allowed to proceed, BEFORE making it.
+ * Decide whether the next call may proceed, BEFORE making it.
  *
- * This function has no side effects and makes no network calls — it is pure
- * arithmetic over the numbers you give it. Call it immediately before your
- * actual API call and only proceed if `result.allowed` is true:
+ * Pure arithmetic: no side effects, no I/O, no clock. Returns
+ * `allowed: projectedTotalUsd <= ceilingUsd`, where `projectedTotalUsd` is
+ * `spentSoFarUsd + projectedNextCallCostUsd` rounded to the nearest
+ * micro-dollar. Because both the next-call cost and the total are rounded, a
+ * single check can allow a true total up to about $0.000001 over the ceiling,
+ * and a call that costs less than $0.0000005 is priced at $0. A running total
+ * built from rounded estimates can drift by up to $0.0000005 per call.
  *
- *   const check = checkPreCallCeiling({
- *     spentSoFarUsd: runningTotal,
- *     ceilingUsd: 25,
- *     estimatedNextCallUsage: { inputTokens: 2000, outputTokens: 500 },
- *     rates: { inputPerMillion: 3, outputPerMillion: 15 }, // from a CLI flag / config, never hardcoded
- *   });
- *   if (!check.allowed) {
- *     console.error(check.reason);
- *     process.exit(1); // or stop the batch loop cleanly, per classify-batch.mjs
- *   }
- *   // ...only now make the actual API call...
- *   runningTotal = check.projectedTotalUsd; // or reconcile with actual usage after the call
+ * It does not track spend for you, and it does not know what the call really
+ * cost. Reconcile `spentSoFarUsd` from actual usage after each call.
+ *
+ * @example
+ * ```ts
+ * const check = checkPreCallCeiling({
+ *   spentSoFarUsd: runningTotal,
+ *   ceilingUsd: 25,
+ *   estimatedNextCallUsage: { inputTokens: 2000, outputTokens: 500 },
+ *   rates, // from a flag or config, never hardcoded
+ * });
+ * if (!check.allowed) throw new Error(check.reason);
+ * // ...only now make the call, then add its real cost to runningTotal.
+ * ```
+ *
+ * @throws Error when `rates` is missing or invalid, `ceilingUsd` or
+ *   `spentSoFarUsd` is not a finite number >= 0 (these messages include the
+ *   rejected value), the usage estimate is invalid, or the total is not finite.
+ *   A null or undefined `check` throws a TypeError.
  */
 export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingResult {
   if (

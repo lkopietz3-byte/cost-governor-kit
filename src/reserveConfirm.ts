@@ -1,10 +1,11 @@
 /**
  * reserveConfirm.ts — two database-agnostic usage-counting patterns.
  *
- * `withReserveConfirm` is source-compatible and keeps its useful failure
- * guarantee, but its read-only check cannot reserve capacity and is advisory
- * under concurrency. `withCapacityReservation` uses an adapter that atomically
- * reserves capacity before upstream work, then confirms or releases that hold.
+ * `withReserveConfirm` never counts a call that throws, but its read-only
+ * check cannot reserve capacity, so it is advisory under concurrency.
+ * `withCapacityReservation` asks YOUR adapter to reserve capacity before
+ * upstream work, then confirms or releases that hold. Whether the limit holds
+ * under concurrency depends entirely on that adapter being atomic.
  *
  * Extracted from cruise-almanac's api/chat.js, which fixed a real slot-leak
  * bug (AUDIT-2026-05-01-v2, finding F3-CC-E-4). The original (pre-fix) code
@@ -33,27 +34,24 @@
  * bump only fires on a confirmed-successful upstream." That's the entire
  * pattern `withReserveConfirm` encodes as a portable, advisory contract.
  *
- * DATABASE-AGNOSTIC BY DESIGN: this file defines only an interface
- * (`UsageLedger`/`CapacityReservationLedger`) and small orchestrators. It has
- * no Supabase, Postgres, or any other
- * database dependency — implement `UsageLedger` against whatever storage
- * your app already uses (Postgres RPC, Redis, DynamoDB, an in-memory map for
- * tests). See reference-impl/supabase-usage-ledger.sql for a ready-to-copy
- * Postgres/Supabase implementation of this exact contract.
+ * DATABASE-AGNOSTIC BY DESIGN: this file defines only interfaces
+ * (`UsageLedger`, `CapacityReservationLedger`) and two small orchestrators.
+ * It has no database dependency and keeps no state of its own. All counting,
+ * atomicity and durability live in the adapter you implement.
+ * reference-impl/supabase-usage-ledger.sql is a Postgres sketch of the
+ * advisory `UsageLedger` only; this kit ships no `CapacityReservationLedger`.
  */
 
 /**
- * The contract any app implements against its own database. `key` is
- * caller-defined — a user id, `${userId}:${date}` for a daily cap,
- * `${userId}:${feature}` for a per-feature cap, or any other string your
- * app uses to identify what's being rate-limited.
+ * Storage contract for the advisory {@link withReserveConfirm} helper. `key`
+ * is caller-defined: a user id, `${userId}:${date}` for a daily cap, or any
+ * other string that identifies what is being limited.
  */
 export interface UsageLedger {
   /**
-   * Phase 1 — read-only. Returns true if usage under `key` is currently
-   * under `limit`. MUST NOT increment or otherwise mutate state — a caller
-   * that finds itself over the limit needs to be able to deny the request
-   * (e.g. return a 429) with zero side effects, including on a retry.
+   * Phase 1, read-only. Resolve `true` if usage under `key` is below
+   * `limit`, otherwise `false`. Must not mutate state. Must resolve a real
+   * boolean: {@link withReserveConfirm} throws on anything else.
    */
   checkUnderLimit(key: string, limit: number): Promise<boolean>;
 
@@ -71,18 +69,25 @@ export interface UsageLedger {
 }
 
 /**
- * Orchestrates the legacy check-then-commit pattern around any async call.
+ * Advisory check-then-commit around one async call. Not a concurrent limit.
  *
- * 1. Calls `ledger.checkUnderLimit(key, limit)`. If it returns false, denies
- *    immediately — `doTheCall` is never invoked and nothing is committed.
- * 2. Otherwise invokes `doTheCall()`. If it throws/rejects, the error
- *    propagates to the caller UNCHANGED and `commitUsage` is never called —
- *    this is the core guarantee: a failed call never burns a slot.
- * 3. Only if `doTheCall()` resolves successfully does it call
- *    `ledger.commitUsage(key)`, then return the result.
+ * 1. Awaits `ledger.checkUnderLimit(key, limit)` (`limit` is passed through
+ *    unvalidated). `false` returns `{ allowed: false }` without calling
+ *    `doTheCall`. A non-boolean result throws a TypeError, also without
+ *    calling `doTheCall`.
+ * 2. Otherwise awaits `doTheCall()`. If it throws or rejects, that error
+ *    propagates unchanged and `commitUsage` is never called: a call that
+ *    fails before reporting success is never counted. (That does not prove a
+ *    timed-out provider call was not charged.)
+ * 3. After success, awaits `ledger.commitUsage(key)` and returns
+ *    `{ allowed: true, result }`. If `commitUsage` rejects, this function
+ *    rejects with that error and the successful result is discarded, even
+ *    though the paid call happened.
  *
- * Example:
+ * Concurrent callers can all pass step 1 before any of them commits, so the
+ * limit can be exceeded. It never retries anything.
  *
+ * @example
  *   const result = await withReserveConfirm(
  *     myLedger,
  *     `${userId}:${today}`,
@@ -122,6 +127,7 @@ export async function withReserveConfirm<T>(
   return { allowed: true, result };
 }
 
+/** Result of {@link withReserveConfirm}. */
 export type ReserveConfirmResult<T> =
   | { allowed: true; result: T }
   | { allowed: false; result?: undefined };
@@ -132,22 +138,35 @@ export type ReserveConfirmResult<T> =
 
 /** One adapter-issued hold on capacity. Pass it back unchanged to the adapter. */
 export interface CapacityReservation {
+  /** Adapter-chosen id; must be a non-empty string. */
   id: string;
+  /** Must equal the request's `key`. */
   key: string;
   /** Stable idempotency key for one logical upstream operation. */
   operationId: string;
-  /** ISO-8601 expiry selected and enforced by the adapter. */
+  /**
+   * Expiry chosen by the adapter; must parse with `Date.parse`. For a newly
+   * acquired hold it must also be later than this process's `Date.now()`, so
+   * clock skew between the adapter and the app matters.
+   */
   expiresAt: string;
 }
 
+/** Input to {@link withCapacityReservation} and `reserveCapacity`. */
 export interface ReserveCapacityRequest {
+  /** Non-empty (after trimming) string identifying what is limited. Not trimmed. */
   key: string;
-  /** Strict maximum for committed plus active reservations under this key. */
+  /**
+   * Maximum for confirmed usage plus unexpired holds under this key, enforced
+   * by the adapter. Must be a safe integer >= 0; 0 is passed to the adapter,
+   * which should deny.
+   */
   limit: number;
-  /** Reuse for recovery of this operation; never replace after an ambiguity. */
+  /** Non-empty idempotency key for one logical operation. Reuse it on every retry; a new id is a new operation. */
   operationId: string;
 }
 
+/** What an adapter's `reserveCapacity` returns. */
 export type ReserveCapacityResult =
   /** This invocation newly acquired the hold and is the only one allowed to execute work. */
   | { status: "acquired"; reservation: CapacityReservation }
@@ -159,7 +178,9 @@ export type ReserveCapacityResult =
   | { status: "operation_terminal"; operationId: string; reason?: string };
 
 /**
- * Storage contract for a strict concurrent capacity limit.
+ * Storage contract for a strict concurrent capacity limit. This is the
+ * safety boundary: {@link withCapacityReservation} has no counter of its own
+ * and trusts these decisions.
  *
  * `reserveCapacity` MUST atomically count confirmed usage and unexpired active
  * reservations for `key`, and create a hold only when that total is below
@@ -188,6 +209,7 @@ export type CapacityWorkOutcome<T> =
   | { status: "succeeded"; value: T }
   | { status: "failed"; error: unknown };
 
+/** Result of {@link withCapacityReservation}. Every status except `denied` and `confirmed` needs reconciliation before any retry of paid work. */
 export type CapacityReservationResult<T> =
   | { status: "denied"; reason?: string }
   | { status: "operation_in_progress"; reservation: CapacityReservation }
@@ -213,10 +235,34 @@ export type CapacityReservationResult<T> =
     };
 
 /**
- * Reserve capacity before one classified upstream operation. Denied work is
- * never invoked. Known failed work releases the exact hold; success confirms.
- * Ambiguous work and confirmation failures keep the hold and never retry or
- * blindly release possibly paid work.
+ * Reserve capacity before one upstream operation, then confirm or release it.
+ *
+ * What this helper guarantees (given any adapter):
+ * - It validates `request` first and throws, without calling the adapter,
+ *   for a limit that is not a safe integer >= 0 or an empty key/operationId.
+ * - It calls `reserveCapacity` exactly once and `doTheWork` at most once,
+ *   only for an `acquired` decision whose reservation has a non-empty id,
+ *   the request's key and operationId, and an `expiresAt` later than
+ *   `Date.now()`. A malformed or unknown decision throws before any work;
+ *   if the adapter did create a hold, it is left in place (not released).
+ * - `{ status: 'succeeded' }` leads to one `confirmReservation` call;
+ *   `{ status: 'failed' }` to one `releaseReservation` call. It never calls
+ *   both, never calls either twice, and never retries.
+ * - A thrown or rejected `doTheWork`, or an outcome of the wrong shape,
+ *   returns `work_outcome_ambiguous` and keeps the hold. A failed confirm
+ *   returns `confirmation_failed` (with the value) and keeps the hold.
+ * - A rejected `reserveCapacity` propagates; no work runs. A hold may or may
+ *   not exist; retry with the same operationId to find out.
+ *
+ * What it does NOT guarantee: the limit itself, atomicity, duplicate
+ * suppression and durability all come from your adapter. It keeps no state,
+ * sets no timers, and has no timeout: a hung adapter or `doTheWork` hangs
+ * this call. If the process crashes after a hold is created, the hold stays
+ * in your storage until your reconciliation confirms or releases it; while
+ * unexpired it counts toward the limit and same-operationId retries get
+ * `operation_in_progress`. Once it expires it stops counting (per the
+ * contract), so paid work that was never confirmed can then push real usage
+ * past the limit until reconciliation confirms it.
  */
 export async function withCapacityReservation<T>(
   ledger: CapacityReservationLedger,
