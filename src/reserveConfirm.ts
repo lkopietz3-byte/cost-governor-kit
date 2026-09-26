@@ -100,7 +100,12 @@ export async function withReserveConfirm<T>(
   limit: number,
   doTheCall: () => Promise<T>,
 ): Promise<ReserveConfirmResult<T>> {
-  const underLimit = await ledger.checkUnderLimit(key, limit);
+  const underLimit: unknown = await ledger.checkUnderLimit(key, limit);
+  // A truthy non-boolean (for example a whole RPC response object) used to
+  // count as "under the limit" and let paid work run. Fail closed instead.
+  if (typeof underLimit !== 'boolean') {
+    throw new TypeError('withReserveConfirm: ledger.checkUnderLimit must resolve to a boolean');
+  }
   if (!underLimit) {
     return { allowed: false };
   }

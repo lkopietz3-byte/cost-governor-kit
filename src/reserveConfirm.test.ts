@@ -101,6 +101,35 @@ describe('withReserveConfirm — over-limit path (phase 1 denies)', () => {
   });
 });
 
+describe('withReserveConfirm — a malformed check result fails closed', () => {
+  it.each([
+    ['a whole RPC response object', { data: [{ allowed: false }], error: null }],
+    ['the string "false"', 'false'],
+    ['the number 1', 1],
+    ['undefined', undefined],
+    ['null', null],
+    ['the number 0', 0],
+  ])('throws without calling or committing when checkUnderLimit resolves %s', async (_label, value) => {
+    let paidCalls = 0;
+    let commits = 0;
+    const ledger = {
+      checkUnderLimit: async () => value,
+      commitUsage: async () => {
+        commits++;
+      },
+    } as unknown as UsageLedger;
+
+    await expect(
+      withReserveConfirm(ledger, 'user-1', 5, async () => {
+        paidCalls++;
+        return 'paid';
+      }),
+    ).rejects.toThrow('withReserveConfirm: ledger.checkUnderLimit must resolve to a boolean');
+    expect(paidCalls).toBe(0);
+    expect(commits).toBe(0);
+  });
+});
+
 describe('withReserveConfirm — concurrency shape (two keys are independent)', () => {
   it('tracks separate keys independently', async () => {
     const ledger = new FakeLedger();
