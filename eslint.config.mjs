@@ -7,8 +7,13 @@ import tseslint from 'typescript-eslint';
 
 export default defineConfig(
   {
-    name: 'kit/linter-controls',
+    // Only an object with nothing but `ignores` (and `name`) is a global
+    // ignore. Adding any other key turns it into a per-object exclusion.
+    name: 'kit/ignore-build-output',
     ignores: ['dist/**', 'coverage/**'],
+  },
+  {
+    name: 'kit/linter-controls',
     linterOptions: { reportUnusedDisableDirectives: 'error' },
   },
   {
@@ -32,6 +37,19 @@ export default defineConfig(
     files: ['scripts/**/*.mjs', 'examples/**/*.mjs', 'eslint.config.mjs'],
     extends: [js.configs.recommended],
     languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'module',
+      globals: globals.nodeBuiltin,
+    },
+  },
+  {
+    // consumer-probe.mts imports the package by name, which only resolves in
+    // the temporary consumer project. verify-package.mjs type-checks it there.
+    name: 'kit/type-probe-script',
+    files: ['scripts/**/*.mts'],
+    extends: [tseslint.configs.recommended],
+    languageOptions: {
+      parser: tseslint.parser,
       ecmaVersion: 'latest',
       sourceType: 'module',
       globals: globals.nodeBuiltin,

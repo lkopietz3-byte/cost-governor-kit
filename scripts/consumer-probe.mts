@@ -59,8 +59,8 @@ checkPreCallCeiling({ estimatedNextCallUsage: usage, spentSoFarUsd: 0, ceilingUs
 const request: ReserveCapacityRequest = { key: 'consumer', limit: 1, operationId: 'synthetic-operation' };
 const ledger: CapacityReservationLedger = {
   reserveCapacity: async (): Promise<ReserveCapacityResult> => ({ status: 'denied' }),
-  confirmReservation: async (_reservation: CapacityReservation) => undefined,
-  releaseReservation: async (_reservation: CapacityReservation) => undefined,
+  confirmReservation: async (reservation: CapacityReservation) => void reservation.id,
+  releaseReservation: async (reservation: CapacityReservation) => void reservation.id,
 };
 
 async function strict(): Promise<string> {
@@ -89,8 +89,8 @@ async function strict(): Promise<string> {
 
 async function advisory(): Promise<number | undefined> {
   const usageLedger: UsageLedger = {
-    checkUnderLimit: async (_key: string, limit: number) => limit > 0,
-    commitUsage: async (_key: string) => undefined,
+    checkUnderLimit: async (key: string, limit: number) => key.length > 0 && limit > 0,
+    commitUsage: async (key: string) => void key,
   };
   const outcome: ReserveConfirmResult<number> = await withReserveConfirm(usageLedger, 'consumer', 1, async () => 7);
   return outcome.allowed ? outcome.result : outcome.result;
