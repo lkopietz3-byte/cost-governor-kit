@@ -1,327 +1,371 @@
 # cost-governor-kit
 
-A tiny, zero-dependency library that gives any AI-calling app three cost-safety
-properties at once — properties that, across an audited portfolio of ~26
-AI-calling apps, no single app had all three of together:
+A small, zero-dependency TypeScript library for three cost-safety jobs in apps
+that call paid AI APIs:
 
-1. **A pre-call dollar ceiling**, checked *before* the API call happens, not
-   monitored after — using rates the caller supplies at call time, never a
-   hardcoded price baked into the library.
-2. **Correct pricing math**, including a real bug fix: Anthropic's cache
-   writes split into two different multipliers (5-minute vs. 1-hour TTL), and
-   collapsing them into one flat multiplier silently under-reports 1-hour
-   cache turns by about 37.5%.
-3. **Two usage-counting choices:** a source-compatible advisory
-   check-then-commit helper that avoids charging known failures, and a strict
-   atomic-reservation contract for concurrent capacity limits.
+1. **Pricing math** (`estimateCostUsd`): token counts plus rates you supply in,
+   dollars out, with cache reads, 5-minute cache writes and 1-hour cache writes
+   priced as separate line items.
+2. **A pre-call dollar ceiling** (`checkPreCallCeiling`): decide *before* a call
+   whether spend so far plus the next call's estimated cost stays within a hard
+   cap. Rates are always passed in; the library has no price table.
+3. **Usage counting around a paid call** (`withReserveConfirm`,
+   `withCapacityReservation`): an advisory check-then-commit helper that never
+   counts a call that throws, and a reserve/confirm/release orchestrator for a
+   strict limit that is enforced by a storage adapter you write.
 
-Every piece here was extracted from a real bug fix or a real gap found in
-production code, not designed in the abstract. See the doc comments in each
-`src/*.ts` file for the specific incident each pattern fixes.
+The patterns come from fixes in the author's own apps; the doc comment at the
+top of each `src/*.ts` file names the incident.
+
+**Don't use it for:**
+
+- Abuse or DDoS rate limiting. This is about your own spend and your users'
+  quotas, not hostile traffic.
+- A price source. It ships no prices; you must supply current ones.
+- A strict concurrent limit out of the box. `withCapacityReservation` is only as
+  strict as the adapter you implement, and this kit ships none for it.
+- Exact billing reconciliation. Estimates are rounded to the micro-dollar and
+  some model-specific cache rates are not modeled (see [Honest limits](#honest-limits)).
 
 ## Install
 
+Not published to npm yet. Install from GitHub (the repository must be readable
+by your account):
+
 ```bash
-npm install
-npm test        # vitest
-npm run typecheck  # tsc --noEmit
+npm install github:lkopietz3-byte/cost-governor-kit
 ```
 
-Zero runtime dependencies. ESM only (`"type": "module"`). MIT licensed.
+npm clones the repo and builds `dist/` through the package's `prepare` script.
+Recent npm versions may warn that `prepare` is not covered by `allowScripts`.
+ESM only, Node 20 or later, no runtime dependencies. MIT licensed.
 
----
+## Quickstart
 
-## 1. Pricing (`src/pricing.ts`)
-
-Pure, zero-I/O cost math. You supply a model's list-price rates and a token
-usage breakdown; it returns a dollar cost.
-
-```ts
-import { estimateCostUsd, type ModelRates } from 'cost-governor-kit/pricing';
-
-const rates: ModelRates = { inputPerMillion: 3, outputPerMillion: 15 }; // e.g. claude-sonnet-5
-
-const cost = estimateCostUsd(rates, {
-  inputTokens: 1_200,
-  outputTokens: 400,
-  cacheReadTokens: 8_000,        // billed at 0.1x the input rate
-  cacheCreation5mTokens: 2_000,  // billed at 1.25x the input rate
-  cacheCreation1hTokens: 0,      // billed at 2.0x the input rate — kept SEPARATE from the 5m bucket
-});
-
-console.log(cost); // => a USD number
-```
-
-**The bug this fixes:** a real cost-tracking system in production collapsed
-both cache-creation TTLs (5-minute and 1-hour) into a single 1.25x
-multiplier. That's correct for 5-minute writes but wrong for 1-hour writes,
-which actually cost 2.0x. Applying 1.25x where 2.0x was owed under-reports
-the true cost of every 1-hour-cache turn by `(2.0 - 1.25) / 2.0 = 37.5%` — a
-cost dashboard quietly telling you a whole class of calls is over a third
-cheaper than it really is. This library keeps `cacheReadTokens`,
-`cacheCreation5mTokens`, and `cacheCreation1hTokens` as three permanently
-distinct fields, each with its own multiplier constant
-(`CACHE_READ_MULTIPLIER`, `CACHE_CREATION_5M_MULTIPLIER`,
-`CACHE_CREATION_1H_MULTIPLIER`), so they can never be silently collapsed back
-into one. `src/pricing.test.ts` has a test that computes both the correct
-and the buggy-collapsed cost for the same usage and asserts they differ by
-~37.5% — proving the fix is real, not just documented.
-
-You bring your own pricing table — this library ships no hardcoded model
-prices (see the ceiling section below for why).
-
-`estimateCostUsd` validates this public boundary before doing cost math. Rates
-must be finite, non-negative numbers, and each supplied token bucket must be a
-non-negative safe integer. Omitted or explicitly `undefined` buckets still
-default to zero; explicit `null` and other malformed values throw. Calculations
-that overflow finite arithmetic also throw. This is a runtime compatibility
-change: fractional token counts, integers outside JavaScript's safe-integer
-range, and explicit `null` values were previously accepted by the arithmetic
-and now throw, as do negative, nonnumeric, and non-finite inputs.
-
-Callers that project usage from a fractional value such as a running average
-must migrate that estimate to whole tokens before calling the estimator or
-ceiling guard. Round each projected bucket up for a conservative cost estimate,
-then ensure it remains within the non-negative safe-integer range.
-
----
-
-## 2. Pre-call dollar ceiling (`src/preCallCeiling.ts`)
-
-Decides whether the *next* call is allowed to happen — before you make it.
-
-```ts
+```js
+import { estimateCostUsd, formatRatesForLog, getRatesOrThrow } from 'cost-governor-kit/pricing';
 import { checkPreCallCeiling } from 'cost-governor-kit/preCallCeiling';
 
-let spentSoFarUsd = 0;
-const ceilingUsd = 25;
-const rates = { inputPerMillion: 3, outputPerMillion: 15 }; // from a CLI flag / config — never hardcoded
+// Your own table. These numbers are illustrative; use current published prices.
+const pricing = { 'my-model': { inputPerMillion: 3, outputPerMillion: 15 } };
+const rates = getRatesOrThrow(pricing, 'my-model');
+console.log(`rates: ${formatRatesForLog(rates)} <- VERIFY against current pricing`);
 
+console.log(estimateCostUsd(rates, {
+  inputTokens: 1_200,
+  outputTokens: 400,
+  cacheReadTokens: 8_000,        // 0.1x the input rate
+  cacheCreation5mTokens: 2_000,  // 1.25x the input rate
+  cacheCreation1hTokens: 0,      // 2x the input rate, kept separate from 5m writes
+}));
+// 0.0195
+
+const check = checkPreCallCeiling({
+  spentSoFarUsd: 24.99,
+  ceilingUsd: 25,
+  estimatedNextCallUsage: { inputTokens: 2_000, outputTokens: 500 },
+  rates,
+});
+console.log(check.allowed, check.projectedTotalUsd);
+// false 25.0035
+console.log(check.reason);
+// Projected total spend $25.003500 (already spent $24.990000 + projected next call $0.013500)
+// would exceed the ceiling of $25.000000. Refusing to make the call.
+```
+
+This exact script was run against the installed package; the comments show its
+output. The hand calculation for `0.0195`: 1,200 x 3 + 8,000 x 3 x 0.1 +
+2,000 x 3 x 1.25 + 400 x 15 = 19,500, divided by 1,000,000.
+
+---
+
+## 1. Pricing (`cost-governor-kit/pricing`)
+
+### `estimateCostUsd(rates, usage): number`
+
+Returns the USD cost of one call, actual or projected:
+
+```
+(input x inRate + cacheRead x inRate x 0.1 + write5m x inRate x 1.25
+ + write1h x inRate x 2 + output x outRate) / 1,000,000
+```
+
+computed in that order in double precision, then rounded to the nearest
+micro-dollar ($0.000001).
+
+- `rates` (`ModelRates`): `{ inputPerMillion, outputPerMillion }`, USD per
+  million tokens, each a finite number >= 0. No default.
+- `usage` (`UsageTokens`): `inputTokens`, `outputTokens`, `cacheReadTokens`,
+  `cacheCreation5mTokens`, `cacheCreation1hTokens`. Each is optional and
+  defaults to 0 when omitted or `undefined`; a supplied value must be a
+  non-negative safe integer.
+- Throws for invalid rates, a `usage` that is not a plain object (including
+  `null` and arrays), an invalid count (`null`, fractional, negative, NaN,
+  Infinity, beyond `Number.MAX_SAFE_INTEGER`), **any unknown key**, or a
+  non-finite result. Messages name the field but not the rejected value.
+
+Unknown keys throw so that a provider payload passed as-is is not priced at $0.
+Map an Anthropic `usage` block like this (`input_tokens` is the uncached
+remainder; `cache_creation_input_tokens` is the total of the two TTL buckets, so
+don't add it separately):
+
+```js
+const u = response.usage;
+const cost = estimateCostUsd(rates, {
+  inputTokens: u.input_tokens,
+  outputTokens: u.output_tokens,
+  cacheReadTokens: u.cache_read_input_tokens ?? 0,
+  cacheCreation5mTokens: u.cache_creation?.ephemeral_5m_input_tokens ?? 0,
+  cacheCreation1hTokens: u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+});
+```
+
+**Rounding policy.** `Math.round` to the nearest micro-dollar. A value exactly
+halfway in binary rounds up, but a decimal half can round down because the
+arithmetic is binary floating point (50 tokens at $0.29/M is exactly 14.5
+micro-dollars on paper, and returns `0.000014`). A call cheaper than $0.0000005
+returns `0`. The result is always the double nearest a whole number of
+micro-dollars, so `estimateCostUsd(...) === 0.0195` style comparisons are exact.
+
+**Why the buckets stay separate.** A cost tracker in the author's own apps once
+applied the 5-minute write multiplier (1.25x) to 1-hour writes too. 1-hour
+writes cost 2x, so that under-reported them by (2.0 - 1.25) / 2.0 = 37.5%.
+`src/pricing.test.ts` computes both numbers.
+
+### Multiplier constants
+
+`CACHE_READ_MULTIPLIER = 0.1`, `CACHE_CREATION_5M_MULTIPLIER = 1.25`,
+`CACHE_CREATION_1H_MULTIPLIER = 2`. The write multipliers match Anthropic's
+pricing page for all listed models (checked 2026-09-24). The 0.1x read
+multiplier is Anthropic's standard rate but **not universal**: the same page
+lists 0.025x for Claude Fable 5.1 and Claude Mythos 5.1 and 0.05x for Claude
+Opus 5.5. For those models this library over-estimates cache-read cost (4x and
+2x). To price them exactly, price the cache reads in a separate call with the
+input rate scaled by (model multiplier / 0.1), for example
+`estimateCostUsd({ inputPerMillion: base * 0.25, outputPerMillion: 0 }, { cacheReadTokens })`
+for 0.025x, and add it to the cost of the other buckets.
+
+Batch discounts, US-only inference surcharges and fast-mode prices are not
+modeled separately. Anthropic applies the cache multipliers on top of those, so
+fold them into the two rates you pass.
+
+### `getRatesOrThrow(table, model): ModelRates`
+
+Looks `model` up in your `PricingTable` (`Record<string, ModelRates>`). Throws,
+listing the known models, when there is no entry. Only the table's own keys
+match: `constructor`, `toString` and `__proto__` throw like any unknown model.
+The returned entry is not validated here; `estimateCostUsd` validates it on use.
+
+### `formatRatesForLog(rates): string`
+
+Returns e.g. `"$3/M in, $15/M out"` for logging on every run, so a stale rate is
+visible. It does not validate or round (`NaN` prints as `$NaN/M`).
+
+---
+
+## 2. Pre-call ceiling (`cost-governor-kit/preCallCeiling`)
+
+### `checkPreCallCeiling(check): PreCallCeilingResult`
+
+`check` is `{ spentSoFarUsd, ceilingUsd, estimatedNextCallUsage, rates }`. It
+prices the estimate with `estimateCostUsd`, adds it to `spentSoFarUsd`, rounds
+the total to the micro-dollar, and returns:
+
+- `allowed`: `projectedTotalUsd <= ceilingUsd` (landing exactly on the ceiling is allowed)
+- `projectedNextCallCostUsd`, `projectedTotalUsd`, `ceilingUsd` (echoed)
+- `reason`: only when denied, a sentence with the amounts
+
+It is pure: no I/O, no clock, no stored state, and it does not mutate its input.
+It throws when `rates` is missing or invalid, when `spentSoFarUsd` or
+`ceilingUsd` is not a finite number >= 0 (these two messages include the value),
+for an invalid usage estimate, or when the total is not finite.
+
+```js
+let spentSoFarUsd = 0;
 for (const record of workItems) {
   const check = checkPreCallCeiling({
     spentSoFarUsd,
-    ceilingUsd,
-    estimatedNextCallUsage: { inputTokens: 2_000, outputTokens: 500 }, // your best estimate
+    ceilingUsd: 25,
+    estimatedNextCallUsage: { inputTokens: 2_000, outputTokens: 500 }, // your estimate
     rates,
   });
-
   if (!check.allowed) {
     console.log(check.reason);
-    break; // stop cleanly — nothing after this point makes another call
+    break; // no call is made after this point
   }
-
   const response = await callYourLlmApi(record);
-  spentSoFarUsd = check.projectedTotalUsd; // or reconcile with the response's real usage block
+  spentSoFarUsd += actualCostFrom(response); // reconcile with real usage, not the estimate
 }
 ```
 
-**Where this comes from:** a portfolio audit of AI-calling apps found plenty
-of *post-hoc spend monitoring* (dashboards, alerts, anomaly detection on
-yesterday's spend) but only one script with a genuine *pre-call* ceiling —
-one that computes the projected cost of the next call and refuses to make it
-at all if that would exceed a hard cap, rather than firing an alert after the
-money's already spent. That script also enforced a discipline worth copying
-directly: rates come in as explicit CLI arguments and are printed on every
-run, specifically so a stale hardcoded price can't silently corrupt the spend
-cap. This module mirrors both: `checkPreCallCeiling` runs before your call
-(never after), and `rates` is a **required** parameter with no default
-anywhere in this file — pass it explicitly, and log it with
-`formatRatesForLog()` from the pricing module so a wrong number is visible,
-not hidden.
-
-```ts
-import { formatRatesForLog } from 'cost-governor-kit/pricing';
-console.log(`rates: ${formatRatesForLog(rates)} <- VERIFY against current pricing`);
-```
+This comes from a batch script in the author's own projects that takes its
+rates as CLI flags, prints them on every run, and checks cumulative spend
+against a hard cap before each call. This module adds one step that script does
+not take: it also prices the next call before allowing it.
 
 ---
 
-## 3. Usage counting (`src/reserveConfirm.ts`)
+## 3. Usage counting (`cost-governor-kit/reserveConfirm`)
 
-### Legacy advisory check-then-commit
-
-A database-agnostic, source-compatible helper that checks before work and
-commits only after a successful call.
+### Advisory: `withReserveConfirm(ledger, key, limit, doTheCall)`
 
 ```ts
 import { withReserveConfirm, type UsageLedger } from 'cost-governor-kit/reserveConfirm';
 
-// Implement this against whatever storage you already use — Postgres,
-// Redis, DynamoDB, an in-memory map for tests. See reference-impl/ for a
-// ready-to-copy Postgres/Supabase implementation of this exact interface.
-declare const myLedger: UsageLedger;
+declare const myLedger: UsageLedger; // your storage
 
-const result = await withReserveConfirm(
-  myLedger,
-  `${userId}:${today}`, // any string key your app wants to rate-limit by
-  5,                     // e.g. 5 free calls/day
-  () => callYourLlmApi(prompt),
-);
-
-if (!result.allowed) {
-  return send429('Daily limit reached');
-}
+const result = await withReserveConfirm(myLedger, `${userId}:${today}`, 5, () => callYourLlmApi(prompt));
+if (!result.allowed) return send429('Daily limit reached');
 return send200(result.result);
 ```
 
-`UsageLedger` is two methods:
+`UsageLedger` is `checkUnderLimit(key, limit): Promise<boolean>` (read-only) and
+`commitUsage(key): Promise<void>`. The helper:
+
+1. Awaits `checkUnderLimit(key, limit)`. `false` returns `{ allowed: false }`
+   without calling. A non-boolean result (for example a whole RPC response
+   object) throws a `TypeError`, also without calling. `limit` is passed through
+   unvalidated.
+2. Awaits `doTheCall()`. If it throws, the error propagates unchanged and
+   `commitUsage` is never called, so a failed call never burns a slot. That does
+   not prove a timed-out provider call was not charged.
+3. Awaits `commitUsage(key)` and returns `{ allowed: true, result }`. If
+   `commitUsage` rejects, the helper rejects with that error and **the
+   successful result is discarded**, even though the paid call happened.
+
+It is **advisory under concurrency**: concurrent requests can all pass the
+check before any of them commits, so the limit can be exceeded (a test runs 10
+concurrent calls at limit 3 and all 10 run). It never retries.
+
+### Strict: `withCapacityReservation(ledger, request, doTheWork)`
 
 ```ts
-interface UsageLedger {
-  checkUnderLimit(key: string, limit: number): Promise<boolean>; // read-only
-  commitUsage(key: string): Promise<void>;                        // mutates
-}
-```
+import { withCapacityReservation, type CapacityReservationLedger } from 'cost-governor-kit/reserveConfirm';
 
-`withReserveConfirm` calls `checkUnderLimit` first; if it returns `false`, it
-denies immediately without ever invoking your call. Otherwise it invokes
-`doTheCall()`. **If `doTheCall()` throws, the error propagates unchanged and
-`commitUsage` is never called.** That only means the helper did not count the
-attempt; it does not prove a timeout failed before a paid provider accepted
-work. Re-running the read-only check is safe. Retrying paid work requires the
-caller's own provider reconciliation or idempotency mechanism.
-
-**Where this comes from:** a real production bug. The original code checked
-a user's daily limit and incremented it in the *same* step, before calling
-the upstream LLM API. When the upstream call was known to fail before a
-successful response, a later safely-reconciled attempt burned a *second*
-slot for a request that had never actually succeeded even once — a single
-flaky call plus its retry could burn a user's whole daily quota with zero
-real usage to show for it. The fix split the gate into two phases: check
-without incrementing (before the call), increment only after a confirmed
-success (after the call). That two-phase split is exactly what
-`withReserveConfirm` encodes.
-
-### Reference implementation: Postgres/Supabase
-
-[`reference-impl/supabase-usage-ledger.sql`](reference-impl/supabase-usage-ledger.sql)
-is a ready-to-copy migration implementing `UsageLedger` as two RPCs —
-`usage_ledger_check_under_limit` (Phase 1, read-only) and
-`usage_ledger_commit_usage` (Phase 2, atomic increment via
-`SELECT ... FOR UPDATE`, called only after your upstream call succeeds). It's
-generic (a `usage_ledger` table with a `key`/`window_key`/`count` shape, no
-product-specific columns) so it drops into any Postgres/Supabase project. The
-SQL file includes a short example TypeScript adapter wiring it up to
-`UsageLedger` via `supabase.rpc(...)`.
-
-### What the legacy helper guarantees
-
-`withReserveConfirm` is **advisory under concurrency**, not a strict capacity
-reservation. Its `checkUnderLimit(key, limit)` call is read-only and its later
-`commitUsage(key)` has neither a limit nor a reservation token. Two concurrent
-requests can both pass the check before either commits. It still provides a
-valuable narrower guarantee: a call that throws before reporting success never
-commits usage, so a known failed call does not burn a slot. Keep using it where
-that behavior is sufficient and source compatibility matters.
-
-### Strict concurrent capacity: atomic reservation
-
-Use `withCapacityReservation` when the limit must hold across concurrent
-requests. The adapter reserves capacity **before** the provider is invoked;
-committed usage plus active reservations must never exceed the supplied limit.
-
-```ts
-import {
-  withCapacityReservation,
-  type CapacityReservationLedger,
-} from 'cost-governor-kit/reserveConfirm';
-
-declare const ledger: CapacityReservationLedger;
+declare const ledger: CapacityReservationLedger; // your atomic, durable adapter
 
 const result = await withCapacityReservation(
   ledger,
-  { key: `${userId}:${today}`, limit: 5, operationId: requestId },
+  { key: `${userId}:${today}`, limit: 5, operationId: requestId }, // reuse requestId on every retry
   async (reservation) => {
-    const response = await callYourLlmApi(prompt, { idempotencyKey: reservation.operationId });
+    const response = await callYourLlmApi(prompt, reservation.operationId);
     return { status: 'succeeded', value: response };
   },
 );
-
 if (result.status === 'denied') return send429('Daily limit reached');
 if (result.status === 'confirmed') return send200(result.value);
-// `operation_in_progress`, `operation_terminal`, `confirmation_failed`,
-// `work_outcome_ambiguous`, and `release_failed` are recovery states.
-// Do not make a second paid provider call.
+// Every other status needs reconciliation. Do not make a second paid call.
 return send503('Usage operation needs reconciliation');
 ```
 
-`CapacityReservationLedger` has three methods: `reserveCapacity`,
-`confirmReservation`, and `releaseReservation`. Its implementation is the
-safety boundary. `reserveCapacity` must atomically count confirmed usage and
-unexpired active reservations before making a hold. It returns `acquired` only
-to the invocation that newly owns execution. A duplicate `(key, operationId)`
-must return `operation_in_progress` while its hold is active, or
-`operation_terminal` after finalization; neither state may invoke the provider
-again or take another slot. The adapter must make confirmation and release
-idempotent. Persist operation IDs with provider idempotency keys where the
-provider supports them.
+Your adapter implements `reserveCapacity(request)`, `confirmReservation(r)` and
+`releaseReservation(r)`. **It is the safety boundary.** The helper has no
+counter of its own and trusts the adapter's decisions. The contract (from the
+TSDoc) is: `reserveCapacity` atomically counts confirmed usage plus unexpired
+holds for the key and creates a hold only when that total is below `limit`; a
+repeated `(key, operationId)` returns `operation_in_progress` while unresolved
+or `operation_terminal` once final, and never a second hold; confirm and release
+are idempotent. A test shows what happens with a non-atomic adapter: 10
+concurrent requests at limit 3 all run.
 
-Before invoking the provider, `withCapacityReservation` validates that the
-adapter decision is exactly `acquired` and that its reservation has a nonempty
-ID, the requested key and operation ID, and a valid unexpired timestamp.
-Unknown decisions or malformed holds fail closed before work runs.
-For `operation_in_progress`, identity and timestamp syntax are still checked,
-but an expired unresolved hold is returned as recovery metadata and never runs
-work; expiry is not permission to release or restart it.
+**What the helper itself guarantees, with any adapter:**
 
-The helper releases only an explicit `{ status: 'failed' }` outcome. Return
-that only when the provider definitely performed no charge and no relevant
-side effect; an unsuccessful user experience alone is not enough. A thrown
-provider operation becomes `work_outcome_ambiguous`, because a timeout can
-occur after paid work was accepted; the hold remains in place. Likewise,
-`confirmation_failed` retains the hold and the successful provider value. The
-helper never retries paid work or blindly releases either state. Reconcile with
-the provider and the ledger using the same `operationId` before retrying.
+- It validates the request first. A `limit` that is not a safe integer >= 0, or
+  an empty `key` or `operationId`, throws without calling the adapter. `limit: 0`
+  is passed to the adapter, which should deny; the helper does not deny locally.
+- It calls `reserveCapacity` once and `doTheWork` at most once, and only for an
+  `acquired` decision whose reservation has a non-empty `id`, the request's
+  `key` and `operationId`, and an `expiresAt` later than this process's
+  `Date.now()`. A malformed or unknown decision throws before any work. If the
+  adapter did create a hold, the helper leaves it in place (it does not release
+  a hold it cannot trust), and with a conforming adapter a retry with the same
+  `operationId` then gets `operation_in_progress`.
+- `{ status: 'succeeded', value }` leads to exactly one `confirmReservation`
+  call; `{ status: 'failed', error }` to exactly one `releaseReservation` call.
+  It never calls both, never calls either twice, and never retries.
+- A thrown or rejected `doTheWork` (sync or async), or an outcome of the wrong
+  shape, returns `work_outcome_ambiguous` and keeps the hold. Return `failed`
+  only when the provider definitely did not charge.
+- A failed confirm returns `confirmation_failed` with the value and keeps the
+  hold. A failed release returns `release_failed` with both errors.
+- A rejected `reserveCapacity` propagates and no work runs. A hold may or may
+  not exist; retry with the same `operationId` to find out.
 
-Reservation expiry is not a substitute for reconciliation. Choose an expiry
-longer than the expected provider operation, use durable operation state and
-fencing/reconciliation for expirations, and retain enough evidence to
-investigate ambiguity. Expiry never makes possibly executing work safe to
-release merely to make capacity look available.
+Result statuses: `denied`, `confirmed`, and five recovery states:
+`operation_in_progress`, `operation_terminal`, `work_outcome_ambiguous`,
+`confirmation_failed`, `release_failed`, plus `released_after_failure` (the hold
+was released after a known no-charge failure).
+
+**If the process crashes between reserve and confirm.** The helper keeps no
+state, sets no timers and has no timeouts, so nothing in this library will ever
+confirm or release that hold. It stays in your adapter's storage as unresolved.
+While it is unexpired it counts toward the limit, and a retry with the same
+`operationId` gets `operation_in_progress` and does not run the provider again.
+Your reconciliation job must find out from the provider (or your own records)
+whether the work happened and then call `confirmReservation` or
+`releaseReservation` directly. Once the hold expires it stops counting under
+this contract, so if the crashed operation did paid work, real usage can exceed
+the limit by one per such operation until reconciliation confirms it. If you
+need the limit to hold across crashes, make your adapter keep counting expired
+but unresolved holds until they are reconciled (capacity stays blocked in the
+meantime). A retry with a *new* `operationId` is a new operation and can run
+the provider again.
+
+### Reference SQL (advisory only)
+
+[`reference-impl/supabase-usage-ledger.sql`](reference-impl/supabase-usage-ledger.sql)
+implements the advisory `UsageLedger` as two Postgres functions, with a
+TypeScript adapter sketch in a comment. It does **not** implement
+`CapacityReservationLedger`. Its commit re-checks the limit under a row lock, so
+the recorded count never exceeds the limit, but two requests that both passed
+the check still both make the paid call; the second is simply not recorded. The
+file was applied to PostgreSQL 18 (PGlite, single session) and its functions
+exercised, including that a role without grants cannot call them. It was not
+tested with concurrent sessions or against a live Supabase project. It ships in
+the npm tarball as copy-and-adapt reference material; nothing imports it.
 
 ---
 
 ## Honest limits
 
-- **This is not abuse/DDoS rate limiting.** Everything here is about
-  *dollar* and *count* ceilings on your own spend and your own users' quotas
-  — not about detecting or blocking malicious traffic, credential stuffing,
-  or bot floods. Pair it with a real rate-limiting/WAF layer if you need
-  that; this library doesn't attempt it.
-- **The pre-call ceiling is only as accurate as the estimate you pass it.**
-  `checkPreCallCeiling` prices `estimatedNextCallUsage`, which by definition
-  is a guess made before the call happens — a fixed per-request heuristic, a
-  tokenizer count, a running average of recent calls, whatever you have. It
-  is *not* the actual usage the call will report. If your estimates run
-  systematically low, the ceiling will let more spend through than you
-  intended, even though every individual check was enforced correctly. If
-  you need exact accounting (not just "don't blow the ceiling"), pair this
-  with **post-call reconciliation**: after each call, compute the real cost
-  from the response's actual usage block with `estimateCostUsd` and use that
-  — not the pre-call estimate — as your running total for the *next*
-  check's `spentSoFarUsd`.
-- **`withReserveConfirm` is advisory, not strict under concurrency.** It
-  avoids committing known failed work but cannot reserve capacity. For a hard
-  concurrent cap, implement `CapacityReservationLedger` and use
-  `withCapacityReservation`; its adapter is responsible for an atomic
-  committed-plus-active-reservations check.
-- **No retries, no backoff, no queueing.** All three modules are synchronous
-  decision points, not a full resilience layer. The library never retries.
-  Retrying a read-only quota check is safe; retrying paid work after an error
-  is safe only after provider reconciliation or under that provider's durable
-  idempotency guarantee.
+- **The ceiling is only as good as your estimate.** `checkPreCallCeiling`
+  prices a guess made before the call. Estimates that run low let more spend
+  through. Reconcile `spentSoFarUsd` from each response's actual usage.
+- **Micro-dollar resolution.** Both the next-call cost and the total are
+  rounded, so one check can allow a true total up to about $0.000001 over the
+  ceiling, a call under $0.0000005 is priced at $0, and a running total of
+  rounded estimates can drift by up to $0.0000005 per call. The ceiling itself
+  is compared as given, so pass whole micro-dollars.
+- **Fixed cache multipliers.** Models whose cache-read rate is not 0.1x are
+  over-estimated (see above). Server-tool fees, such as per-search charges,
+  are not modeled.
+- **No price data.** Rates you pass can be stale; the library cannot tell.
+- **The strict limit lives in your adapter.** This kit ships no
+  `CapacityReservationLedger`, and its tests use single-process in-memory
+  doubles, which prove the helper's call sequencing, not any real storage.
+- **`withReserveConfirm` is advisory**, discards a successful result if the
+  commit fails, and passes `limit` through unvalidated.
+- **Clock skew.** A newly acquired hold must expire later than this process's
+  `Date.now()`. If your app's clock runs ahead of your database's by more than
+  the hold's lifetime, every acquire is rejected (and each hold is left for
+  reconciliation).
+- **No retries, backoff, queueing or timeouts.** Retrying a read-only check is
+  safe; retrying paid work is safe only after reconciliation or under the
+  provider's own idempotency guarantee.
+- **Not abuse protection.** Pair it with real rate limiting if you need that.
 
-## Files
+## Related
 
+`honesty-mcp` (a sibling project) depends on this kit and exposes it as a
+`scaffold_cost_governor` guidance tool rather than a check tool, because the
+ledger contracts need your storage. This kit does not depend on any other kit.
+
+## Development
+
+```bash
+npm ci
+npm run verify   # lint, typecheck, test, build, then pack + install + probe the tarball
 ```
-src/
-  pricing.ts              Pure pricing math + the cache-multiplier fix
-  pricing.test.ts
-  preCallCeiling.ts        Pre-call dollar ceiling, live rates required
-  preCallCeiling.test.ts
-  reserveConfirm.ts        Advisory helper + strict reservation contracts
-  reserveConfirm.test.ts
-  index.ts                 Barrel export
-reference-impl/
-  supabase-usage-ledger.sql  Postgres/Supabase implementation of UsageLedger
-```
+
+See `ENGINEERING.md` for the invariants and release notes and `CHANGELOG.md`
+for changes.
