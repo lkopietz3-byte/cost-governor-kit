@@ -96,8 +96,18 @@ export interface UsageTokens {
 export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
   assertRate('inputPerMillion', rates?.inputPerMillion);
   assertRate('outputPerMillion', rates?.outputPerMillion);
-  if (!usage || typeof usage !== 'object') {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
     throw new Error('estimateCostUsd: usage must be an object of token counts');
+  }
+  // An unrecognized key (a provider's snake_case field, a typo) would
+  // otherwise be ignored and its tokens priced at $0.
+  for (const key of Object.keys(usage)) {
+    if (!USAGE_FIELDS.includes(key as keyof UsageTokens)) {
+      throw new Error(
+        `estimateCostUsd: usage has unknown field ${JSON.stringify(key)}; ` +
+          `expected only ${USAGE_FIELDS.join(', ')}`,
+      );
+    }
   }
 
   const inputTokens = tokenCountOrZero(usage, 'inputTokens');
@@ -124,6 +134,14 @@ export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
 
   return roundToMicroDollar(costUsd);
 }
+
+const USAGE_FIELDS: ReadonlyArray<keyof UsageTokens> = [
+  'inputTokens',
+  'outputTokens',
+  'cacheReadTokens',
+  'cacheCreation5mTokens',
+  'cacheCreation1hTokens',
+];
 
 function assertRate(field: keyof ModelRates, value: number): void {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {

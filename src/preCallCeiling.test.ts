@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { checkPreCallCeiling } from './preCallCeiling.js';
-import type { ModelRates } from './pricing.js';
+import type { ModelRates, UsageTokens } from './pricing.js';
 
 const rates: ModelRates = { inputPerMillion: 3, outputPerMillion: 15 };
 
@@ -178,6 +178,20 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
       }
     },
   );
+
+  it('rejects a provider-shaped usage estimate instead of allowing it under a $0 ceiling', () => {
+    // Before the unknown-field check, these keys were ignored, the call priced
+    // at $0, and a 5M-token call was "allowed" under a $0 ceiling.
+    const providerShaped = { input_tokens: 5_000_000 } as unknown as UsageTokens;
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 0,
+        estimatedNextCallUsage: providerShaped,
+        rates,
+      }),
+    ).toThrow(/unknown field "input_tokens"/);
+  });
 
   it('rejects projected-total rounding that overflows finite arithmetic', () => {
     expect(() =>

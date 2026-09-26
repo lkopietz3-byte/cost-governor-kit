@@ -8,6 +8,7 @@ import {
   getRatesOrThrow,
   type ModelRates,
   type PricingTable,
+  type UsageTokens,
 } from './pricing.js';
 
 // Toy rates — deliberately round numbers so expected costs are easy to hand-check.
@@ -146,6 +147,38 @@ describe('estimateCostUsd — validates its public numeric inputs', () => {
 
   it('rejects the reproduced negative-output-token cost bypass', () => {
     expect(() => estimateCostUsd(rates, { outputTokens: -1_000_000 })).toThrow(/outputTokens/);
+  });
+
+  it('rejects an Anthropic-style snake_case usage block instead of pricing it at $0', () => {
+    // The provider's own field names. Before this check they were ignored,
+    // every bucket defaulted to 0, and a real 1M-in/1M-out call priced at $0.
+    const providerUsage = { input_tokens: 1_000_000, output_tokens: 1_000_000 };
+    expect(() => estimateCostUsd(rates, providerUsage as unknown as UsageTokens)).toThrow(
+      /unknown field "input_tokens"/,
+    );
+  });
+
+  it('rejects a misspelled bucket name instead of silently dropping it', () => {
+    const typo = { cacheCreationTokens: 1_000_000 };
+    expect(() => estimateCostUsd(rates, typo as unknown as UsageTokens)).toThrow(
+      /unknown field "cacheCreationTokens"/,
+    );
+  });
+
+  it('rejects a known bucket mixed with an unknown one', () => {
+    const mixed = { inputTokens: 10, model: 'toy-model-a' };
+    expect(() => estimateCostUsd(rates, mixed as unknown as UsageTokens)).toThrow(/unknown field "model"/);
+  });
+
+  it.each([
+    ['null', null],
+    ['a number', 5],
+    ['a string', 'inputTokens'],
+    ['an array', [1_000_000]],
+  ])('rejects %s as the usage argument', (_label, usage) => {
+    expect(() => estimateCostUsd(rates, usage as unknown as UsageTokens)).toThrow(
+      /usage must be an object of token counts/,
+    );
   });
 });
 
