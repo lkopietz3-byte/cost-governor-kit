@@ -1,8 +1,19 @@
 {
   "name": "cost-governor-kit",
   "version": "0.1.0",
-  "description": "Three cost-safety properties every AI-calling app should have, assembled into one library: a pre-call dollar ceiling with live caller-supplied rates, correct cache-aware pricing math, and a reserve-then-confirm atomic usage-counting contract.",
-  "keywords": [],
+  "description": "Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates, and reserve/confirm usage-counting helpers whose limits are enforced by your own storage adapter.",
+  "keywords": [
+    "llm",
+    "ai",
+    "cost",
+    "pricing",
+    "spend-limit",
+    "budget",
+    "prompt-caching",
+    "quota",
+    "usage-limit",
+    "anthropic"
+  ],
   "author": "Lucas Kopietz",
   "license": "MIT",
   "repository": {

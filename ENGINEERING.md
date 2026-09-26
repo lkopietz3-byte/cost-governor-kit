@@ -1,39 +1,60 @@
 # Engineering contract
 
-## Scope and invariants
+## Invariants
 
-This is a dependency-free runtime library with caller-supplied rates. Keep the five token buckets and cache multipliers distinct, preserve valid arithmetic and exact-ceiling behavior, and reject malformed inputs before returning cost decisions. Public token counts are non-negative safe integers; projection callers must round averages up conservatively and validate their range.
+- Zero runtime dependencies. No I/O, no price table, no default rates.
+- Pricing keeps five buckets; cache reads (0.1x), 5-minute writes (1.25x) and
+  1-hour writes (2x) are distinct line items. Results round to the nearest
+  micro-dollar with `Math.round`.
+- Invalid inputs throw before any cost decision: non-finite or negative rates,
+  token counts that are not non-negative safe integers, unknown usage keys.
+- `checkPreCallCeiling` allows iff the rounded projected total is `<=` the
+  ceiling. It is pure.
+- `withReserveConfirm` never commits a call that throws, and fails closed on a
+  non-boolean check. It is advisory under concurrency.
+- `withCapacityReservation` runs work at most once, only after a validated
+  `acquired` decision; calls confirm or release at most once, never both;
+  never retries; never releases after an ambiguous outcome. The strict limit,
+  atomicity, duplicate suppression and durability belong to the caller's
+  adapter.
 
-The legacy usage helper is advisory under concurrency. Strict reservation correctness depends on a caller-owned durable atomic adapter; denial, duplicate operations and ambiguous provider outcomes must never cause automatic provider re-execution or blind release. Unit-test ledger doubles do not prove a real adapter. Read README and the affected public contracts before changing behavior.
+## Set up and verify
 
-## Reproducible checks
-
-Use Node 26.3.0 and the committed lockfile on Linux or macOS. No credentials, provider calls or database are required by these checks. Run sequentially from the repository root:
+Node 20 or later (CI's main job pins Node 26.3.0). From the repository root:
 
 ```sh
-npm ci --no-audit
+npm ci
+npm run verify          # lint, typecheck, test, build, verify:package
 npm run audit:dependencies
-npm run lint
-npm run typecheck
-npm test -- --maxWorkers=1 --minWorkers=1
-npm run build
-npm run verify:package
 ```
 
-`verify:package` requires the preceding build. It packs the actual exports, installs the tarball into a fresh temporary consumer offline with lifecycle scripts disabled, then checks runtime root/subpath imports, representative denial behavior and strict NodeNext declarations. It prints the evidence directory and successful tarball hash; temporary evidence is retained for inspection. This proves the package boundary with synthetic inputs, not provider billing or live concurrency behavior.
+`verify:package` packs the build, rejects tests/configs/scripts in the
+tarball, installs it offline into a temporary project, imports every export,
+compares runtime export names with `api-surface.json`, runs
+`scripts/consumer-probe.mjs`, and compiles `scripts/consumer-probe.mts` with
+strict NodeNext settings. After an intended export change, run
+`node scripts/verify-package.mjs --update-api` and review the diff.
 
-The **Library tests and package** job runs on every PR, main push and manual request using a clean Ubuntu runner. Errors stop the affected step/job; no advisory fallback is allowed. Actions use reviewed commit pins and weekly Actions and npm Dependabot update proposals. Review toolchain compatibility and supported version lines before accepting updates; no update is automatically merged. This does not establish that branch protection or npm security alerts are enabled. Pin updates must preserve the same check name and be verified before integration.
+CI (`.github/workflows/verify.yml`) runs audit, lint, typecheck, test, build
+and `verify:package` on Node 26.3.0, plus build, test and `verify:package` on
+Node 20, 22 and 24. Actions are pinned by commit SHA.
 
-Source lint covers every TypeScript implementation/test file, Node ESM verification script and the lint config, using stable recommended correctness and type-aware rules with zero warnings. The only test-specific rule adjustment permits async functions without await: in-memory ledger doubles deliberately implement promised interfaces, including rejected-promise and scheduling semantics. Promise misuse and floating-promise checks still apply to tests. No source suppression is required. Typecheck remains separate.
+## Not certified
 
-The dependency audit reads the complete lockfile, including cross-platform optional packages and development tooling, and blocks on every reported severity; an unavailable advisory service is a failed check, not a clean security result. A clean audit covers known advisories at the time of the run, not all vulnerabilities. Vitest 3.2.7 and Vite 6.4.3 are exact development pins for the smallest compatible security repair; Vite 6.4 receives security backports. Review these support boundaries during updates. The package still declares no runtime dependencies.
+- No real storage adapter is tested. Unit tests use single-process in-memory
+  doubles; they prove the helpers' call sequencing, not atomicity.
+- The reference SQL was exercised once on PostgreSQL 18 (PGlite, single
+  session). It is not run in CI, not tested with concurrent sessions, and not
+  tested on a live Supabase project.
+- No provider billing is checked. Multipliers match Anthropic's pricing page as
+  read on 2026-09-24, except models with a non-0.1x cache-read rate.
+- A clean `npm audit` covers known advisories at the time of the run only.
 
-Gate definitions are not pass evidence. Record each actual run against the final revision before claiming these checks are verified.
+## Release and rollback
 
-## Review and release
-
-Record exact revision/dirty-file hashes, environment, commands, results and material limits. Preserve first failures; do not weaken assertions or deadlines to manufacture a pass. Use a separate skeptical review for pricing, quota or durable-data changes. Check affected downstream consumers before integrating a runtime contract change.
-
-Green CI establishes only the checks it actually ran. Main integration, published version/consumer verification, real adapters/providers and production outcomes are separate gates. Apply existing authorization requirements to merges, npm publication, provider calls, deployments and data operations. No workflow step performs those actions.
-
-Before a package release, choose a compatible version and migration plan, verify actual consumers and the final packed version, and record the previous known-working package version plus the consumer rollback procedure. Avoid blindly reverting a safety fix; a consumer rollback must still protect the original boundary. Preserve the separate reservation and numeric repair reviews when integrating their stacked branches.
+The package has never been published; the version stays `0.1.0` until a
+release. Before publishing: run `npm run verify` on the release commit, check
+the `npm pack --dry-run` file list, and check the downstream `honesty-mcp`
+build, which depends on this kit through a `file:` path. Rollback for
+consumers is pinning the previous version or commit; do not roll back past a
+validation fix without restoring an equivalent check.
