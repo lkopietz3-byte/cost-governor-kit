@@ -3,7 +3,8 @@
 ## Invariants
 
 - Zero runtime dependencies. No I/O, no price table, no default rates.
-- Pricing keeps five buckets; cache reads (0.1x), 5-minute writes (1.25x) and
+- Pricing keeps five buckets; cache reads (0.1x by default, or
+  `ModelRates.cacheReadPerMillion` when supplied), 5-minute writes (1.25x) and
   1-hour writes (2x) are distinct line items. Results round to the nearest
   micro-dollar with `Math.round`.
 - Invalid inputs throw before any cost decision: non-finite or negative rates,
@@ -11,7 +12,8 @@
 - `checkPreCallCeiling` allows iff the rounded projected total is `<=` the
   ceiling. It is pure.
 - `withReserveConfirm` never commits a call that throws, and fails closed on a
-  non-boolean check. It is advisory under concurrency.
+  non-boolean check. Advisory under concurrency; a rejected `commitUsage`
+  returns the result with `commitError` set, not discarded.
 - `withCapacityReservation` runs work at most once, only after a validated
   `acquired` decision; calls confirm or release at most once, never both;
   never retries; never releases after an ambiguous outcome. The strict limit,
@@ -43,11 +45,13 @@ Node 20, 22 and 24. Actions are pinned by commit SHA.
 
 - No real storage adapter is tested. Unit tests use single-process in-memory
   doubles; they prove the helpers' call sequencing, not atomicity.
-- The reference SQL was exercised once on PostgreSQL 18 (PGlite, single
-  session). It is not run in CI, not tested with concurrent sessions, and not
-  tested on a live Supabase project.
+- The reference SQL runs against PostgreSQL 18 via PGlite in `npm test` (CI
+  covers it), a **single connection**: this proves the grant fix and the
+  check/commit/window logic, never concurrent sessions or a live Supabase
+  project.
 - No provider billing is checked. Multipliers match Anthropic's pricing page as
-  read on 2026-09-24, except models with a non-0.1x cache-read rate.
+  read on 2026-09-24, except models with a non-0.1x cache-read rate and no
+  `cacheReadPerMillion` override.
 - A clean `npm audit` covers known advisories at the time of the run only.
 
 ## Release and rollback

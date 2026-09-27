@@ -86,15 +86,18 @@ output. The hand calculation for `0.0195`: 1,200 x 3 + 8,000 x 3 x 0.1 +
 Returns the USD cost of one call, actual or projected:
 
 ```
-(input x inRate + cacheRead x inRate x 0.1 + write5m x inRate x 1.25
+(input x inRate + cacheRead x readRate + write5m x inRate x 1.25
  + write1h x inRate x 2 + output x outRate) / 1,000,000
 ```
 
 computed in that order in double precision, then rounded to the nearest
-micro-dollar ($0.000001).
+micro-dollar ($0.000001). `readRate` is `rates.cacheReadPerMillion` when you
+supply it, otherwise `inRate x 0.1`.
 
 - `rates` (`ModelRates`): `{ inputPerMillion, outputPerMillion }`, USD per
-  million tokens, each a finite number >= 0. No default.
+  million tokens, each a finite number >= 0, no default; plus an optional
+  `cacheReadPerMillion` (also USD per million, >= 0) that overrides the fixed
+  0.1x cache-read ratio — see below.
 - `usage` (`UsageTokens`): `inputTokens`, `outputTokens`, `cacheReadTokens`,
   `cacheCreation5mTokens`, `cacheCreation1hTokens`. Each is optional and
   defaults to 0 when omitted or `undefined`; a supplied value must be a
@@ -139,9 +142,13 @@ writes cost 2x, so that under-reported them by (2.0 - 1.25) / 2.0 = 37.5%.
 pricing page for all listed models (checked 2026-09-24). The 0.1x read
 multiplier is Anthropic's standard rate but **not universal**: the same page
 lists 0.025x for Claude Fable 5.1 and Claude Mythos 5.1 and 0.05x for Claude
-Opus 5.5. For those models this library over-estimates cache-read cost (4x and
-2x). To price them exactly, price the cache reads in a separate call with the
-input rate scaled by (model multiplier / 0.1), for example
+Opus 5.5. For those models, set `ModelRates.cacheReadPerMillion` to the real
+per-million cache-read price and it replaces the 0.1x ratio entirely for that
+call, for example `{ inputPerMillion: 10, outputPerMillion: 50, cacheReadPerMillion: 0.25 }`
+(illustrative numbers) for a 0.025x-cache-read model at a $10/M input rate. If
+you would rather not add the field, the older workaround still works: price
+the cache reads in a separate call with the input rate scaled by (model
+multiplier / 0.1), for example
 `estimateCostUsd({ inputPerMillion: base * 0.25, outputPerMillion: 0 }, { cacheReadTokens })`
 for 0.025x, and add it to the cost of the other buckets.
 
@@ -216,6 +223,7 @@ declare const myLedger: UsageLedger; // your storage
 
 const result = await withReserveConfirm(myLedger, `${userId}:${today}`, 5, () => callYourLlmApi(prompt));
 if (!result.allowed) return send429('Daily limit reached');
+if (result.commitError) logForReconciliation(result.commitError); // usage may be under-recorded
 return send200(result.result);
 ```
 
@@ -229,9 +237,12 @@ return send200(result.result);
 2. Awaits `doTheCall()`. If it throws, the error propagates unchanged and
    `commitUsage` is never called, so a failed call never burns a slot. That does
    not prove a timed-out provider call was not charged.
-3. Awaits `commitUsage(key)` and returns `{ allowed: true, result }`. If
-   `commitUsage` rejects, the helper rejects with that error and **the
-   successful result is discarded**, even though the paid call happened.
+3. Awaits `commitUsage(key)`. If it resolves, returns `{ allowed: true, result }`.
+   If it rejects, the paid call already happened and its result is **not**
+   discarded: this returns `{ allowed: true, result, commitError }` instead of
+   rejecting, where `commitError` is whatever `commitUsage` rejected with. The
+   presence of `commitError` is your signal that the usage count may be
+   under-recorded for this call — log it and reconcile.
 
 It is **advisory under concurrency**: concurrent requests can all pass the
 check before any of them commits, so the limit can be exceeded (a test runs 10
@@ -318,11 +329,18 @@ implements the advisory `UsageLedger` as two Postgres functions, with a
 TypeScript adapter sketch in a comment. It does **not** implement
 `CapacityReservationLedger`. Its commit re-checks the limit under a row lock, so
 the recorded count never exceeds the limit, but two requests that both passed
-the check still both make the paid call; the second is simply not recorded. The
-file was applied to PostgreSQL 18 (PGlite, single session) and its functions
-exercised, including that a role without grants cannot call them. It was not
-tested with concurrent sessions or against a live Supabase project. It ships in
-the npm tarball as copy-and-adapt reference material; nothing imports it.
+the check still both make the paid call; the second is simply not recorded.
+
+`src/referenceImplPglite.test.ts` applies this file, unmodified, to a fresh
+[PGlite](https://github.com/electric-sql/pglite) database as part of `npm test`
+(so CI runs it on every push) and checks: a role with no explicit grant is
+denied on both functions and `service_role` is allowed (the round-1 grant
+fix), the Supabase `anon`/`authenticated` revoke branch, fresh-key and
+window-rollover behavior, and the limit-reached and limit-0 cases. **PGlite is
+a single connection**, so this test proves nothing about concurrent
+sessions — the file's own header comment covers what happens then. It was
+not run against a live Supabase project. It ships in the npm tarball as
+copy-and-adapt reference material; nothing imports it.
 
 ---
 
@@ -336,15 +354,17 @@ the npm tarball as copy-and-adapt reference material; nothing imports it.
   ceiling, a call under $0.0000005 is priced at $0, and a running total of
   rounded estimates can drift by up to $0.0000005 per call. The ceiling itself
   is compared as given, so pass whole micro-dollars.
-- **Fixed cache multipliers.** Models whose cache-read rate is not 0.1x are
-  over-estimated (see above). Server-tool fees, such as per-search charges,
-  are not modeled.
+- **Cache-write multipliers are fixed.** The 1.25x and 2x cache-creation
+  multipliers are not overridable. A model whose cache-read rate is not 0.1x
+  is over-estimated unless you set `ModelRates.cacheReadPerMillion` (see
+  above). Server-tool fees, such as per-search charges, are not modeled.
 - **No price data.** Rates you pass can be stale; the library cannot tell.
 - **The strict limit lives in your adapter.** This kit ships no
   `CapacityReservationLedger`, and its tests use single-process in-memory
   doubles, which prove the helper's call sequencing, not any real storage.
-- **`withReserveConfirm` is advisory**, discards a successful result if the
-  commit fails, and passes `limit` through unvalidated.
+- **`withReserveConfirm` is advisory**, returns the successful result with a
+  `commitError` field (instead of discarding it) if the commit fails, and
+  passes `limit` through unvalidated.
 - **Clock skew.** A newly acquired hold must expire later than this process's
   `Date.now()`. If your app's clock runs ahead of your database's by more than
   the hold's lifetime, every acquire is rejected (and each hold is left for
