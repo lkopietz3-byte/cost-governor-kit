@@ -42,6 +42,19 @@ export interface ModelRates {
   inputPerMillion: number;
   /** USD per 1,000,000 output tokens. Must be a finite number >= 0. */
   outputPerMillion: number;
+  /**
+   * USD per 1,000,000 cache-read tokens (`cache_read_input_tokens`). Optional;
+   * must be a finite number >= 0 when present. When set, it REPLACES
+   * {@link CACHE_READ_MULTIPLIER} entirely for this call: cache-read cost
+   * becomes `cacheReadTokens x cacheReadPerMillion`, not
+   * `cacheReadTokens x inputPerMillion x CACHE_READ_MULTIPLIER`. Use it for a
+   * model whose real cache-read rate is not 0.1x of `inputPerMillion` (see
+   * {@link CACHE_READ_MULTIPLIER}), instead of the separate-call scaling
+   * workaround. When omitted, cache reads keep pricing at
+   * `inputPerMillion x CACHE_READ_MULTIPLIER`. Does not appear in
+   * {@link formatRatesForLog}'s output.
+   */
+  cacheReadPerMillion?: number;
 }
 
 /**
@@ -54,11 +67,12 @@ export type PricingTable = Record<string, ModelRates>;
 
 /**
  * Cache reads (`cache_read_input_tokens`) are priced at 0.1x the base input
- * rate. This matches Anthropic's standard multiplier, but not every model:
- * Anthropic's pricing page (checked 2026-09-24) lists 0.025x for Claude Fable
- * 5.1 and Claude Mythos 5.1 and 0.05x for Claude Opus 5.5. For those models
- * this library over-estimates cache-read cost (4x and 2x). To price such a
- * model exactly, price its cache reads in a separate call with
+ * rate by default. This matches Anthropic's standard multiplier, but not
+ * every model: Anthropic's pricing page (checked 2026-09-24) lists 0.025x for
+ * Claude Fable 5.1 and Claude Mythos 5.1 and 0.05x for Claude Opus 5.5. For
+ * those models this default over-estimates cache-read cost (4x and 2x). Set
+ * {@link ModelRates.cacheReadPerMillion} to price such a model exactly
+ * (preferred), or price its cache reads in a separate call with
  * `inputPerMillion` scaled by (model multiplier / 0.1).
  */
 export const CACHE_READ_MULTIPLIER = 0.1;
@@ -103,9 +117,11 @@ export interface UsageTokens {
  * Compute the USD cost of one call, actual or projected.
  *
  * Formula, in this order, in IEEE-754 double precision:
- * `(input x inRate + cacheRead x inRate x 0.1 + write5m x inRate x 1.25 +
+ * `(input x inRate + cacheRead x readRate + write5m x inRate x 1.25 +
  * write1h x inRate x 2 + output x outRate) / 1,000,000`, then rounded to the
- * nearest micro-dollar ($0.000001) with `Math.round`.
+ * nearest micro-dollar ($0.000001) with `Math.round`, where `readRate` is
+ * `rates.cacheReadPerMillion` when supplied, otherwise `inRate x 0.1`
+ * ({@link CACHE_READ_MULTIPLIER}).
  *
  * Rounding policy: a value exactly halfway between two micro-dollars in binary
  * rounds up, but a cost that is a decimal half (for example 50 tokens at
@@ -124,6 +140,9 @@ export interface UsageTokens {
 export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
   assertRate('inputPerMillion', rates?.inputPerMillion);
   assertRate('outputPerMillion', rates?.outputPerMillion);
+  if (rates?.cacheReadPerMillion !== undefined) {
+    assertRate('cacheReadPerMillion', rates.cacheReadPerMillion);
+  }
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
     throw new Error('estimateCostUsd: usage must be an object of token counts');
   }
@@ -144,9 +163,18 @@ export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
   const cacheCreation5mTokens = tokenCountOrZero(usage, 'cacheCreation5mTokens');
   const cacheCreation1hTokens = tokenCountOrZero(usage, 'cacheCreation1hTokens');
 
+  // Preserve the original multiply-sum-divide order for the default path
+  // (no override) exactly, so existing rounding results do not shift by a
+  // floating-point ULP: only substitute a different expression when
+  // cacheReadPerMillion is actually present.
+  const cacheReadCostUsd =
+    rates.cacheReadPerMillion !== undefined
+      ? cacheReadTokens * rates.cacheReadPerMillion
+      : cacheReadTokens * rates.inputPerMillion * CACHE_READ_MULTIPLIER;
+
   const unscaledCostUsd =
     inputTokens * rates.inputPerMillion +
-    cacheReadTokens * rates.inputPerMillion * CACHE_READ_MULTIPLIER +
+    cacheReadCostUsd +
     cacheCreation5mTokens * rates.inputPerMillion * CACHE_CREATION_5M_MULTIPLIER +
     cacheCreation1hTokens * rates.inputPerMillion * CACHE_CREATION_1H_MULTIPLIER +
     outputTokens * rates.outputPerMillion;

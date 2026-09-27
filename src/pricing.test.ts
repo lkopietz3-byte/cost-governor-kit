@@ -307,6 +307,62 @@ describe('estimateCostUsd — hand-calculated examples', () => {
   });
 });
 
+describe('estimateCostUsd — optional cacheReadPerMillion overrides the fixed 0.1x ratio', () => {
+  it('prices cache reads at cacheReadPerMillion directly instead of inputPerMillion x 0.1', () => {
+    // Illustrative rates: inputPerMillion 3 would give 0.1x = $0.3/M for cache
+    // reads; cacheReadPerMillion overrides that entirely to $1/M.
+    const overridden: ModelRates = { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 1 };
+    const cost = estimateCostUsd(overridden, { cacheReadTokens: 1_000_000 });
+    expect(cost).toBe(1); // NOT 0.3 (the 0.1x default)
+  });
+
+  it('leaves the default 0.1x ratio in place when cacheReadPerMillion is omitted', () => {
+    const withoutOverride: ModelRates = { inputPerMillion: 3, outputPerMillion: 15 };
+    expect(estimateCostUsd(withoutOverride, { cacheReadTokens: 1_000_000 })).toBe(0.3);
+  });
+
+  it('combines with the other four buckets, which stay priced off inputPerMillion', () => {
+    // input 10,000 x 3 = 30,000; cache read 40,000 x 1 (override) = 40,000;
+    // 5m write 3,000 x 3 x 1.25 = 11,250; 1h write 2,000 x 3 x 2 = 12,000;
+    // output 1,500 x 15 = 22,500. Sum 115,750 / 1,000,000 = 0.11575.
+    const rates: ModelRates = { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 1 };
+    expect(
+      estimateCostUsd(rates, {
+        inputTokens: 10_000,
+        cacheReadTokens: 40_000,
+        cacheCreation5mTokens: 3_000,
+        cacheCreation1hTokens: 2_000,
+        outputTokens: 1_500,
+      }),
+    ).toBe(0.11575);
+  });
+
+  it('can price the real 0.025x and 0.05x models exactly, without the input-rate-scaling workaround', () => {
+    // Same models the README calls out as over-estimated by the fixed 0.1x
+    // ratio: at a $10/M input rate, 0.025x is $0.25/M and 0.05x is $0.50/M.
+    const quarterMultiplier: ModelRates = { inputPerMillion: 10, outputPerMillion: 0, cacheReadPerMillion: 10 * 0.025 };
+    const halfMultiplier: ModelRates = { inputPerMillion: 10, outputPerMillion: 0, cacheReadPerMillion: 10 * 0.05 };
+    expect(estimateCostUsd(quarterMultiplier, { cacheReadTokens: 1_000_000 })).toBe(0.25);
+    expect(estimateCostUsd(halfMultiplier, { cacheReadTokens: 1_000_000 })).toBe(0.5);
+  });
+
+  it.each(invalidRateValues)('rejects a %s cacheReadPerMillion instead of silently ignoring it', (_label, value) => {
+    expect(() =>
+      estimateCostUsd({ inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: value }, {}),
+    ).toThrow(/cacheReadPerMillion/);
+  });
+
+  it('accepts zero as an explicit cacheReadPerMillion (free cache reads)', () => {
+    const rates: ModelRates = { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0 };
+    expect(estimateCostUsd(rates, { cacheReadTokens: 1_000_000 })).toBe(0);
+  });
+
+  it('does not require cacheReadPerMillion to price a call with no cache-read tokens', () => {
+    const rates: ModelRates = { inputPerMillion: 3, outputPerMillion: 15 };
+    expect(estimateCostUsd(rates, { inputTokens: 1_000 })).toBe(0.003);
+  });
+});
+
 describe('estimateCostUsd — rounding policy (nearest micro-dollar)', () => {
   const inputOnly = (inputPerMillion: number) => ({ inputPerMillion, outputPerMillion: 0 });
 
