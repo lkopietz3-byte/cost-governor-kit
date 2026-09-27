@@ -14,7 +14,10 @@
 //      changes are always a deliberate diff.
 //   6. Run scripts/consumer-probe.mjs (required, kit-specific) from the
 //      consumer project, importing the package by name like a real user.
-//   7. If scripts/consumer-probe.mts exists, compile it with strict
+//   7. If scripts/consumer-probe.cjs exists, `require()` the package from a
+//      plain CommonJS consumer, on a Node version that supports
+//      require(esm) (20.19+/22.12+) — otherwise this step is skipped.
+//   8. If scripts/consumer-probe.mts exists, compile it with strict
 //      NodeNext settings against the installed declarations.
 //
 // No network access is needed and no package lifecycle scripts run.
@@ -72,6 +75,36 @@ for (const required of ['package.json', 'README.md', 'LICENSE']) {
 }
 assert.ok(packed.some((p) => p.startsWith('dist/')), 'Tarball has no dist/ output; run npm run build first');
 
+// 2b. Every source map's `sources` entry must resolve for a consumer: either
+// that source file is itself shipped in the tarball, or the map embeds its
+// text via a non-empty `sourcesContent` entry. This kit currently emits no
+// source maps at all (see README/ENGINEERING), so this is a no-op today; it
+// guards against a future tsconfig change (or a stale dist/ tsc did not
+// clean up after one) shipping a map nothing can resolve.
+const packedSet = new Set(packed);
+for (const mapPath of packed.filter((p) => p.endsWith('.map'))) {
+  const map = JSON.parse(readFileSync(join(root, mapPath), 'utf8'));
+  const sources = Array.isArray(map.sources) ? map.sources : [];
+  const sourcesContent = Array.isArray(map.sourcesContent) ? map.sourcesContent : [];
+  const mapDir = mapPath.split('/').slice(0, -1);
+  sources.forEach((src, i) => {
+    const parts = [...mapDir, ...String(src).split('/')];
+    const resolved = [];
+    for (const part of parts) {
+      if (part === '.' || part === '') continue;
+      if (part === '..') resolved.pop();
+      else resolved.push(part);
+    }
+    const shipped = packedSet.has(resolved.join('/'));
+    const embedded = typeof sourcesContent[i] === 'string' && sourcesContent[i].length > 0;
+    assert.ok(
+      shipped || embedded,
+      `${mapPath}: source "${src}" is neither shipped in the tarball nor embedded via sourcesContent ` +
+        `(stale dist/? rebuild from clean, or check inlineSources)`,
+    );
+  });
+}
+
 // 3. Install into a clean consumer --------------------------------------------
 run('npm', [
   'install', '--offline', '--ignore-scripts', '--no-audit', '--no-fund',
@@ -127,7 +160,31 @@ if (!updateApi) {
 copyFileSync(probe, join(consumer, 'probe.mjs'));
 run(process.execPath, ['probe.mjs'], consumer);
 
-// 7. Optional strict type probe --------------------------------------------------------------
+// 7. Optional CommonJS require() smoke test, on Node versions that support it -----------------
+const cjsProbe = join(root, 'scripts', 'consumer-probe.cjs');
+let commonjsChecked = false;
+if (existsSync(cjsProbe)) {
+  if (supportsRequireEsm(process.versions.node)) {
+    // The .cjs extension makes Node treat this as CommonJS regardless of the
+    // consumer project's own package.json "type": "module".
+    copyFileSync(cjsProbe, join(consumer, 'probe.cjs'));
+    run(process.execPath, ['probe.cjs'], consumer);
+    commonjsChecked = true;
+  } else {
+    console.log(`Skipping CommonJS require() probe: Node ${process.versions.node} predates require(esm) support (20.19+/22.12+).`);
+  }
+}
+
+/** Node 20.19+ and 22.12+ (and every 23+) support `require()` of an ESM package. */
+function supportsRequireEsm(version) {
+  const [major, minor] = version.split('.').map(Number);
+  if (major > 22) return true;
+  if (major === 22) return minor >= 12;
+  if (major === 20) return minor >= 19;
+  return false;
+}
+
+// 8. Optional strict type probe --------------------------------------------------------------
 const typeProbe = join(root, 'scripts', 'consumer-probe.mts');
 let typeChecked = false;
 if (existsSync(typeProbe)) {
@@ -147,5 +204,6 @@ console.log(JSON.stringify({
   tarballSha256: createHash('sha256').update(readFileSync(tarball)).digest('hex'),
   importedEntries: entries,
   apiSurfaceChecked: !updateApi,
+  commonjsChecked,
   strictDeclarationsChecked: typeChecked,
 }));
