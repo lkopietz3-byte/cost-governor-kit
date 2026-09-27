@@ -6,7 +6,7 @@ Mapped on **2026-09-26** from connected GitHub, Vercel, and Supabase metadata. T
 
 - Repository: [lkopietz3-byte/cost-governor-kit](https://github.com/lkopietz3-byte/cost-governor-kit)
 - Purpose: A library for enforcing pre-call AI spending limits, calculating usage costs, and counting successful usage safely under concurrent requests.
-- GitHub visibility: **private**; default branch: **`main`**; archived: **no**.
+- GitHub visibility: **public**; default branch: **`main`**; archived: **no**.
 - Product stage, owner, production health, and GitHub protection/settings beyond the fields above: **not verified**.
 
 ## Starting points
