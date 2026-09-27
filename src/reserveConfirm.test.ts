@@ -887,21 +887,38 @@ describe('withReserveConfirm — advisory behavior, pinned', () => {
     expect(counts.get('user-1')).toBe(10);
   });
 
-  it('if commitUsage rejects, the helper rejects and the successful paid result is discarded', async () => {
+  it('if commitUsage rejects, returns the paid result with commitError instead of discarding it', async () => {
     let paid = 0;
+    const commitFailure = new Error('commit failed');
     const ledger: UsageLedger = {
       checkUnderLimit: async () => true,
       commitUsage: async () => {
-        throw new Error('commit failed');
+        throw commitFailure;
       },
     };
-    await expect(
-      withReserveConfirm(ledger, 'user-1', 5, async () => {
-        paid++;
-        return 'PAID RESULT';
-      }),
-    ).rejects.toThrow('commit failed');
+    const result = await withReserveConfirm(ledger, 'user-1', 5, async () => {
+      paid++;
+      return 'PAID RESULT';
+    });
+    expect(result).toEqual({ allowed: true, result: 'PAID RESULT', commitError: commitFailure });
     expect(paid).toBe(1);
+  });
+
+  it('does not attach commitError when commitUsage succeeds', async () => {
+    const result = await withReserveConfirm(new FakeLedger(), 'user-1', 5, async () => 'ok');
+    expect(result).toEqual({ allowed: true, result: 'ok' });
+    expect('commitError' in result).toBe(false);
+  });
+
+  it('propagates a non-Error rejection from commitUsage as commitError unchanged', async () => {
+    const ledger: UsageLedger = {
+      checkUnderLimit: async () => true,
+      commitUsage: async () => {
+        throw 'a plain string rejection'; // eslint-disable-line @typescript-eslint/only-throw-error -- proving the helper does not assume Error
+      },
+    };
+    const result = await withReserveConfirm(ledger, 'user-1', 5, async () => 'paid');
+    expect(result).toEqual({ allowed: true, result: 'paid', commitError: 'a plain string rejection' });
   });
 
   it('propagates a rejected checkUnderLimit without calling', async () => {

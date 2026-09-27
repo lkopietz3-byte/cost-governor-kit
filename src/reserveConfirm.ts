@@ -79,10 +79,13 @@ export interface UsageLedger {
  *    propagates unchanged and `commitUsage` is never called: a call that
  *    fails before reporting success is never counted. (That does not prove a
  *    timed-out provider call was not charged.)
- * 3. After success, awaits `ledger.commitUsage(key)` and returns
- *    `{ allowed: true, result }`. If `commitUsage` rejects, this function
- *    rejects with that error and the successful result is discarded, even
- *    though the paid call happened.
+ * 3. After success, awaits `ledger.commitUsage(key)`. If it resolves, returns
+ *    `{ allowed: true, result }`. If it rejects, the paid call already
+ *    happened and its result is NOT discarded: this returns
+ *    `{ allowed: true, result, commitError }` instead of rejecting, where
+ *    `commitError` is exactly what `commitUsage` rejected with (whatever type
+ *    that was). The presence of `commitError` is the caller's signal that the
+ *    usage count may be under-recorded for this call.
  *
  * Concurrent callers can all pass step 1 before any of them commits, so the
  * limit can be exceeded. It never retries anything.
@@ -122,14 +125,25 @@ export async function withReserveConfirm<T>(
   // caller decision that requires provider reconciliation/idempotency.
   const result = await doTheCall();
 
-  await ledger.commitUsage(key);
+  try {
+    await ledger.commitUsage(key);
+  } catch (commitError) {
+    // The paid call already succeeded; only recording it failed afterward.
+    // Return the result instead of discarding it — the usage count may now
+    // be under-recorded, which the caller can detect via `commitError`.
+    return { allowed: true, result, commitError };
+  }
 
   return { allowed: true, result };
 }
 
-/** Result of {@link withReserveConfirm}. */
+/**
+ * Result of {@link withReserveConfirm}. `commitError` is present only when
+ * `commitUsage` rejected after a successful call; its absence means the call
+ * both succeeded and was recorded.
+ */
 export type ReserveConfirmResult<T> =
-  | { allowed: true; result: T }
+  | { allowed: true; result: T; commitError?: unknown }
   | { allowed: false; result?: undefined };
 
 // ---------------------------------------------------------------------------
