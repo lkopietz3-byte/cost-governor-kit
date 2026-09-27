@@ -342,6 +342,40 @@ sessions — the file's own header comment covers what happens then. It was
 not run against a live Supabase project. It ships in the npm tarball as
 copy-and-adapt reference material; nothing imports it.
 
+**`src/referenceImplPostgres.test.ts` fills the concurrency gap above.** It is
+skipped unless `COST_GOVERNOR_PG_URL` is set, so it does not run as part of
+`npm test`, `npm run verify`, or CI. Run it yourself against a real, local
+Postgres 17:
+
+```sh
+# Start a throwaway Postgres 17 (adjust paths/port as needed; this does not
+# touch any existing Postgres install or use brew services):
+initdb -D /tmp/cgk-pg -A trust -U postgres
+pg_ctl -D /tmp/cgk-pg -o "-p 54329 -k /tmp/cgk-pg -c listen_addresses=''" -l /tmp/cgk-pg.log start
+createdb -h /tmp/cgk-pg -p 54329 -U postgres cost_governor_test
+
+COST_GOVERNOR_PG_URL="postgresql://postgres@/cost_governor_test?host=/tmp/cgk-pg&port=54329" \
+  npm run test:postgres
+
+pg_ctl -D /tmp/cgk-pg stop
+```
+
+It drops and reapplies the SQL to get a fresh schema, then opens 50 separate
+`pg` connections (real sessions, not PGlite) and fires `usage_ledger_commit_usage`
+at all of them concurrently against one key with `limit: 10`, repeated 5
+times including against never-before-seen keys (racing the
+`INSERT ... ON CONFLICT` path, not just the update path). **What it proved,
+run 2026-09-26 against Postgres 17.11:** exactly 10 of 50 concurrent commits
+succeed every time, the successful commits get distinct sequential counts
+1&ndash;10 with no gaps or duplicates, and the stored row never exceeds 10. A
+second scenario fires 50 concurrent `usage_ledger_check_under_limit` calls
+against a fresh key before any commits land: all 50 return `allowed: true`
+even though the limit is 10 — proving Phase 1 is genuinely advisory under
+real concurrency, exactly as the SQL file's header describes — while the
+Phase 2 commits that follow still cap at 10. **What it does not prove:** live
+Supabase's own role/default-privilege setup and PgBouncer pooling, or
+behavior under a network partition or Postgres failover.
+
 ---
 
 ## Honest limits

@@ -41,14 +41,29 @@ CI (`.github/workflows/verify.yml`) runs audit, lint, typecheck, test, build
 and `verify:package` on Node 26.3.0, plus build, test and `verify:package` on
 Node 20, 22 and 24. Actions are pinned by commit SHA.
 
+`npm run test:postgres` runs `src/referenceImplPostgres.test.ts` against a
+real, locally running Postgres 17, pointed at by `COST_GOVERNOR_PG_URL`. It is
+skipped (not run) by `npm test`, `npm run verify`, or CI when that variable is
+unset, so it needs no CI infrastructure and adds no dependency to the normal
+verify path. See README.md ("Reference SQL (advisory only)") for the exact
+commands to start a throwaway server and run it. It is the only test that
+proves anything about concurrent Postgres sessions.
+
 ## Not certified
 
 - No real storage adapter is tested. Unit tests use single-process in-memory
   doubles; they prove the helpers' call sequencing, not atomicity.
 - The reference SQL runs against PostgreSQL 18 via PGlite in `npm test` (CI
   covers it), a **single connection**: this proves the grant fix and the
-  check/commit/window logic, never concurrent sessions or a live Supabase
-  project.
+  check/commit/window logic, not concurrent sessions or a live Supabase
+  project. `npm run test:postgres` (not run by CI; see above) covers real
+  concurrent sessions against a local Postgres 17 and proves
+  `usage_ledger_commit_usage`'s row lock caps the recorded count exactly at
+  the limit under 50 concurrent commits, and that
+  `usage_ledger_check_under_limit` is genuinely advisory under concurrency.
+  It still does not prove anything about a live Supabase project (its role
+  and default-privilege setup, PgBouncer pooling) or behavior under a network
+  partition or Postgres failover.
 - No provider billing is checked. Multipliers match Anthropic's pricing page as
   read on 2026-09-24, except models with a non-0.1x cache-read rate and no
   `cacheReadPerMillion` override.
