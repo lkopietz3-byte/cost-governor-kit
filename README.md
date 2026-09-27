@@ -349,7 +349,11 @@ Postgres 17:
 
 ```sh
 # Start a throwaway Postgres 17 (adjust paths/port as needed; this does not
-# touch any existing Postgres install or use brew services):
+# touch any existing Postgres install or use brew services). Keep the data
+# directory path short: Unix socket paths are limited to about 103 bytes.
+# On macOS, the server may refuse to start ("postmaster became multithreaded")
+# unless LC_ALL is set, as below.
+export LC_ALL=en_US.UTF-8
 initdb -D /tmp/cgk-pg -A trust -U postgres
 pg_ctl -D /tmp/cgk-pg -o "-p 54329 -k /tmp/cgk-pg -c listen_addresses=''" -l /tmp/cgk-pg.log start
 createdb -h /tmp/cgk-pg -p 54329 -U postgres cost_governor_test
