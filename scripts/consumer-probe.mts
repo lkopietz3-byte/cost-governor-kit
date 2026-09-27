@@ -37,6 +37,10 @@ import {
 
 const table: PricingTable = { 'toy-model': { inputPerMillion: 3, outputPerMillion: 15 } };
 const rates: ModelRates = getRatesOrThrow(table, 'toy-model');
+// cacheReadPerMillion is optional on ModelRates and typed as a number.
+const ratesWithCacheReadOverride: ModelRates = { ...rates, cacheReadPerMillion: 1 };
+const overriddenCacheReadRate: number | undefined = ratesWithCacheReadOverride.cacheReadPerMillion;
+void overriddenCacheReadRate;
 const usage: UsageTokens = { inputTokens: 1000, cacheCreation1hTokens: 10 };
 const cost: number = estimateCostUsd(rates, usage);
 const multiplier: number = CACHE_READ_MULTIPLIER;
@@ -93,6 +97,12 @@ async function advisory(): Promise<number | undefined> {
     commitUsage: async (key: string) => void key,
   };
   const outcome: ReserveConfirmResult<number> = await withReserveConfirm(usageLedger, 'consumer', 1, async () => 7);
+  if (outcome.allowed) {
+    // commitError is optional and typed unknown: present only when the
+    // commit failed after a successful call, per the TSDoc contract.
+    const commitError: unknown = outcome.commitError;
+    if (commitError !== undefined) return outcome.result;
+  }
   return outcome.allowed ? outcome.result : outcome.result;
 }
 

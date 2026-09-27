@@ -29,6 +29,12 @@ assert.equal(
   0.0195,
 );
 assert.equal(estimateCostUsd(rates, { cacheCreation1hTokens: 1_000_000 }), 6);
+// cacheReadPerMillion overrides the fixed 0.1x ratio (0.3 -> 1) when supplied.
+assert.equal(estimateCostUsd({ ...rates, cacheReadPerMillion: 1 }, { cacheReadTokens: 1_000_000 }), 1);
+assert.throws(
+  () => estimateCostUsd({ ...rates, cacheReadPerMillion: -1 }, {}),
+  /cacheReadPerMillion/,
+);
 assert.throws(() => estimateCostUsd(rates, { inputTokens: -1 }), /inputTokens/);
 assert.throws(() => estimateCostUsd(rates, { input_tokens: 1_000 }), /unknown field "input_tokens"/);
 assert.equal(formatRatesForLog(rates), '$3/M in, $15/M out');
@@ -98,6 +104,17 @@ assert.equal(counts.get('j'), undefined);
 await assert.rejects(
   withReserveConfirm({ checkUnderLimit: async () => ({ allowed: false }), commitUsage: async () => {} }, 'k', 1, async () => 'x'),
   /must resolve to a boolean/,
+);
+// A commit that fails after a successful call returns the result with
+// commitError, instead of discarding it.
+const commitFailure = new Error('ledger down');
+const flakyLedger = {
+  checkUnderLimit: async () => true,
+  commitUsage: async () => { throw commitFailure; },
+};
+assert.deepEqual(
+  await withReserveConfirm(flakyLedger, 'k', 1, async () => 'paid'),
+  { allowed: true, result: 'paid', commitError: commitFailure },
 );
 
 console.log('consumer-probe: ok');
