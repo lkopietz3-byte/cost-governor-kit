@@ -61,6 +61,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:postgres": "vitest run src/referenceImplPostgres.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "tsc -p tsconfig.build.json",
     "verify:package": "node scripts/verify-package.mjs",
@@ -69,13 +70,14 @@
     "prepare": "npm run build",
     "verify": "npm run lint && npm run typecheck && npm test && npm run build && npm run verify:package"
   },
-  "dependencies": {},
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",
     "@eslint/js": "10.0.1",
     "@types/node": "22.20.4",
+    "@types/pg": "8.23.1",
     "eslint": "10.9.1",
     "globals": "17.12.0",
+    "pg": "8.23.0",
     "typescript": "^5.6.3",
     "typescript-eslint": "8.70.0",
     "vite": "7.3.6",

@@ -32,7 +32,13 @@ First release. Not yet published to npm.
 - `reference-impl/supabase-usage-ledger.sql`: a Postgres sketch of the advisory
   `UsageLedger`, shipped as reference material. `npm test` applies it to a
   fresh PGlite database and exercises the check/commit RPCs and the grant fix
-  (see Behavior worth knowing); this does not test concurrent sessions.
+  (see Behavior worth knowing); PGlite is a single connection and does not
+  test concurrent sessions. A separate, opt-in `npm run test:postgres`
+  (`src/referenceImplPostgres.test.ts`, skipped unless `COST_GOVERNOR_PG_URL`
+  is set, not run by `npm test`/CI) exercises 50 real concurrent Postgres
+  sessions against `usage_ledger_commit_usage` and proves the row lock caps
+  the recorded count at the limit, while `usage_ledger_check_under_limit` is
+  genuinely advisory under that same concurrency.
 
 ### Behavior worth knowing
 
