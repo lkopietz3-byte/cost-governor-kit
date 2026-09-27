@@ -54,3 +54,22 @@ First release.
   `SECURITY DEFINER` functions and enables row level security on its table;
   a PGlite test proves a role with no grant is denied and `service_role` is
   allowed.
+- CommonJS `require("cost-governor-kit")` works alongside `import`, on Node
+  20.19+/22.12+ (`require(esm)` support) — `exports` adds a `default`
+  condition next to `import` for every entry point.
+- Every input-validation failure in `pricing.ts`, `preCallCeiling.ts` and
+  `reserveConfirm.ts` throws a `TypeError` (wrong type or shape) or a
+  `RangeError` (right type, bad value) instead of a plain `Error`, matching
+  the sibling kits. Plain `Error` remains only for the internal "result
+  overflowed to non-finite" safety net and `getRatesOrThrow`'s
+  unconfigured-model lookup — neither is malformed input.
+- README's Quickstart now imports from the package root
+  (`from 'cost-governor-kit'`) as the primary example; the per-module
+  subpaths (`/pricing`, `/preCallCeiling`, `/reserveConfirm`) remain
+  available and are documented as an option. The root import also resolves
+  under TypeScript's legacy `node10` resolution, which the subpaths do not.
+- `build` clears `dist/` before invoking `tsc`, and `verify:package` checks
+  every shipped source map's `sources` resolve, so a stale build can no
+  longer ship a dangling map. This kit still emits no source maps by
+  design (see README's "Honest limits"); the check is a no-op guard against
+  a future regression, not a behavior change today.
