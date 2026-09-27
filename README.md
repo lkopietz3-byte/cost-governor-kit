@@ -34,14 +34,17 @@ npm install cost-governor-kit
 ```
 
 Or build from source: clone the repository, then run `npm ci` and
-`npm run build`. ESM only, Node 20 or later, no runtime dependencies. MIT
-licensed.
+`npm run build`. Node 20 or later, no runtime dependencies. MIT licensed.
+
+This is an ESM package (`"type": "module"`). `import` works everywhere;
+plain CommonJS `require("cost-governor-kit")` also works, but only on a Node
+version that supports `require(esm)` — Node 22.12+ or 20.19+. On an older
+Node, use dynamic `import()` from CommonJS instead.
 
 ## Quickstart
 
 ```js
-import { estimateCostUsd, formatRatesForLog, getRatesOrThrow } from 'cost-governor-kit/pricing';
-import { checkPreCallCeiling } from 'cost-governor-kit/preCallCeiling';
+import { estimateCostUsd, formatRatesForLog, getRatesOrThrow, checkPreCallCeiling } from 'cost-governor-kit';
 
 // Your own table. These numbers are illustrative; use current published prices.
 const pricing = { 'my-model': { inputPerMillion: 3, outputPerMillion: 15 } };
@@ -73,6 +76,13 @@ console.log(check.reason);
 This exact script was run against the installed package; the comments show its
 output. The hand calculation for `0.0195`: 1,200 x 3 + 8,000 x 3 x 0.1 +
 2,000 x 3 x 1.25 + 400 x 15 = 19,500, divided by 1,000,000.
+
+Every export above is also available from its own subpath — `cost-governor-kit/pricing`,
+`cost-governor-kit/preCallCeiling`, `cost-governor-kit/reserveConfirm` — importing the
+same module either way. Use a subpath if you only want one job's code in your
+bundle; the root import above is the simplest default and, unlike the
+subpaths, resolves under TypeScript's legacy `node10`/`node` module
+resolution too.
 
 ---
 
@@ -408,10 +418,13 @@ behavior under a network partition or Postgres failover.
   safe; retrying paid work is safe only after reconciliation or under the
   provider's own idempotency guarantee.
 - **Not abuse protection.** Pair it with real rate limiting if you need that.
+- **No source maps.** The build emits no `.js.map`/`.d.ts.map`; go-to-definition
+  lands on the shipped `.d.ts`/`.js`, not `src/`. The source is small and not
+  minified, so this is a deliberate omission, not an oversight.
 
 ## Related
 
-`honesty-mcp` (a sibling project) depends on this kit and exposes it as a
+[`honesty-mcp`](https://github.com/lkopietz3-byte/honesty-mcp) (a sibling project) depends on this kit and exposes it as a
 `scaffold_cost_governor` guidance tool rather than a check tool, because the
 ledger contracts need your storage. This kit does not depend on any other kit.
 

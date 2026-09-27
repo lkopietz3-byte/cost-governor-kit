@@ -117,22 +117,46 @@ describe('checkPreCallCeiling — spend and ceiling inputs', () => {
   it.each([
     ['NaN', Number.NaN],
     ['Infinity', Number.POSITIVE_INFINITY],
-    ['a numeric string', '5' as unknown as number],
-  ])('rejects a %s ceiling', (_label, ceilingUsd) => {
+  ])('rejects a %s ceiling with a RangeError', (_label, ceilingUsd) => {
     expect(() =>
       checkPreCallCeiling({ spentSoFarUsd: 0, ceilingUsd, estimatedNextCallUsage: {}, rates }),
     ).toThrow(/ceilingUsd must be a non-negative finite number/);
+    expect(() =>
+      checkPreCallCeiling({ spentSoFarUsd: 0, ceilingUsd, estimatedNextCallUsage: {}, rates }),
+    ).toThrow(RangeError);
+  });
+
+  it('rejects a non-numeric ceiling with a TypeError', () => {
+    const ceilingUsd = '5' as unknown as number;
+    expect(() =>
+      checkPreCallCeiling({ spentSoFarUsd: 0, ceilingUsd, estimatedNextCallUsage: {}, rates }),
+    ).toThrow(/ceilingUsd must be a non-negative finite number/);
+    expect(() =>
+      checkPreCallCeiling({ spentSoFarUsd: 0, ceilingUsd, estimatedNextCallUsage: {}, rates }),
+    ).toThrow(TypeError);
   });
 
   it.each([
     ['negative', -0.01],
     ['NaN', Number.NaN],
     ['Infinity', Number.POSITIVE_INFINITY],
-    ['a numeric string', '1' as unknown as number],
-  ])('rejects a %s spentSoFarUsd', (_label, spentSoFarUsd) => {
+  ])('rejects a %s spentSoFarUsd with a RangeError', (_label, spentSoFarUsd) => {
     expect(() =>
       checkPreCallCeiling({ spentSoFarUsd, ceilingUsd: 5, estimatedNextCallUsage: {}, rates }),
     ).toThrow(/spentSoFarUsd must be a non-negative finite number/);
+    expect(() =>
+      checkPreCallCeiling({ spentSoFarUsd, ceilingUsd: 5, estimatedNextCallUsage: {}, rates }),
+    ).toThrow(RangeError);
+  });
+
+  it('rejects a non-numeric spentSoFarUsd with a TypeError', () => {
+    const spentSoFarUsd = '1' as unknown as number;
+    expect(() =>
+      checkPreCallCeiling({ spentSoFarUsd, ceilingUsd: 5, estimatedNextCallUsage: {}, rates }),
+    ).toThrow(/spentSoFarUsd must be a non-negative finite number/);
+    expect(() =>
+      checkPreCallCeiling({ spentSoFarUsd, ceilingUsd: 5, estimatedNextCallUsage: {}, rates }),
+    ).toThrow(TypeError);
   });
 
   it('does not mutate its input', () => {
@@ -144,7 +168,7 @@ describe('checkPreCallCeiling — spend and ceiling inputs', () => {
 });
 
 describe('checkPreCallCeiling — rates must be explicit, never defaulted', () => {
-  it('throws if rates is missing', () => {
+  it('throws a TypeError if rates is missing', () => {
     expect(() =>
       checkPreCallCeiling({
         spentSoFarUsd: 0,
@@ -154,9 +178,18 @@ describe('checkPreCallCeiling — rates must be explicit, never defaulted', () =
         rates: undefined,
       }),
     ).toThrow(/rates.*required/is);
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 5,
+        estimatedNextCallUsage: {},
+        // @ts-expect-error — intentionally omitting the required rates param
+        rates: undefined,
+      }),
+    ).toThrow(TypeError);
   });
 
-  it('throws if rates has a non-numeric field', () => {
+  it('throws a TypeError if rates has a non-numeric field', () => {
     expect(() =>
       checkPreCallCeiling({
         spentSoFarUsd: 0,
@@ -165,10 +198,10 @@ describe('checkPreCallCeiling — rates must be explicit, never defaulted', () =
         // @ts-expect-error — intentionally malformed rates
         rates: { inputPerMillion: 'stale-string-price', outputPerMillion: 15 },
       }),
-    ).toThrow();
+    ).toThrow(TypeError);
   });
 
-  it('rejects a negative ceiling', () => {
+  it('rejects a negative ceiling with a RangeError', () => {
     expect(() =>
       checkPreCallCeiling({
         spentSoFarUsd: 0,
@@ -177,6 +210,14 @@ describe('checkPreCallCeiling — rates must be explicit, never defaulted', () =
         rates,
       }),
     ).toThrow(/ceilingUsd/);
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: -1,
+        estimatedNextCallUsage: {},
+        rates,
+      }),
+    ).toThrow(RangeError);
   });
 });
 
@@ -190,6 +231,14 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
         rates: { inputPerMillion: -3, outputPerMillion: 15 },
       }),
     ).toThrow(/inputPerMillion/);
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 0,
+        estimatedNextCallUsage: { inputTokens: 1_000_000 },
+        rates: { inputPerMillion: -3, outputPerMillion: 15 },
+      }),
+    ).toThrow(RangeError);
   });
 
   it('rejects the reproduced negative-input-token bypass before returning allowed', () => {
@@ -201,6 +250,14 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
         rates,
       }),
     ).toThrow(/inputTokens/);
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 4,
+        ceilingUsd: 5,
+        estimatedNextCallUsage: { inputTokens: -1_000_000 },
+        rates,
+      }),
+    ).toThrow(RangeError);
   });
 
   it.each([
@@ -209,7 +266,7 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
     'cacheReadTokens',
     'cacheCreation5mTokens',
     'cacheCreation1hTokens',
-  ] as const)('rejects a negative %s estimate', (field) => {
+  ] as const)('rejects a negative %s estimate with a RangeError', (field) => {
     expect(() =>
       checkPreCallCeiling({
         spentSoFarUsd: 0,
@@ -218,6 +275,14 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
         rates,
       }),
     ).toThrow(new RegExp(field));
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 5,
+        estimatedNextCallUsage: { [field]: -1 },
+        rates,
+      }),
+    ).toThrow(RangeError);
   });
 
   it.each([
@@ -226,7 +291,7 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
     ['positive infinity', Number.POSITIVE_INFINITY],
     ['negative infinity', Number.NEGATIVE_INFINITY],
     ['unsafe integer', Number.MAX_SAFE_INTEGER + 1],
-  ] as const)('rejects a %s token estimate', (_label, inputTokens) => {
+  ] as const)('rejects a %s token estimate with a RangeError', (_label, inputTokens) => {
     expect(() =>
       checkPreCallCeiling({
         spentSoFarUsd: 0,
@@ -235,10 +300,18 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
         rates,
       }),
     ).toThrow(/inputTokens/);
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 5,
+        estimatedNextCallUsage: { inputTokens },
+        rates,
+      }),
+    ).toThrow(RangeError);
   });
 
   it.each(['inputPerMillion', 'outputPerMillion'] as const)(
-    'rejects invalid %s rates',
+    'rejects invalid %s rates with a RangeError',
     (field) => {
       for (const value of [-1, Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
         expect(() =>
@@ -249,6 +322,14 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
             rates: { ...rates, [field]: value },
           }),
         ).toThrow(new RegExp(field));
+        expect(() =>
+          checkPreCallCeiling({
+            spentSoFarUsd: 0,
+            ceilingUsd: 5,
+            estimatedNextCallUsage: {},
+            rates: { ...rates, [field]: value },
+          }),
+        ).toThrow(RangeError);
       }
     },
   );
@@ -265,6 +346,14 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
         rates,
       }),
     ).toThrow(/unknown field "input_tokens"/);
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 0,
+        estimatedNextCallUsage: providerShaped,
+        rates,
+      }),
+    ).toThrow(TypeError);
   });
 
   it('rejects projected-total rounding that overflows finite arithmetic', () => {

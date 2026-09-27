@@ -409,11 +409,18 @@ describe('withCapacityReservation — strict concurrent capacity lifecycle', () 
     };
 
     await expect(withCapacityReservation(ledger, { key: 'user-1', limit: Number.NaN, operationId: 'op-1' }, work)).rejects.toThrow('non-negative safe integer');
+    await expect(withCapacityReservation(ledger, { key: 'user-1', limit: Number.NaN, operationId: 'op-1' }, work)).rejects.toThrow(RangeError);
     await expect(withCapacityReservation(ledger, { key: 'user-1', limit: -1, operationId: 'op-2' }, work)).rejects.toThrow('non-negative safe integer');
+    await expect(withCapacityReservation(ledger, { key: 'user-1', limit: -1, operationId: 'op-2' }, work)).rejects.toThrow(RangeError);
     await expect(withCapacityReservation(ledger, { key: 'user-1', limit: 1.5, operationId: 'op-3' }, work)).rejects.toThrow('non-negative safe integer');
+    await expect(withCapacityReservation(ledger, { key: 'user-1', limit: 1.5, operationId: 'op-3' }, work)).rejects.toThrow(RangeError);
+    await expect(withCapacityReservation(ledger, { key: 'user-1', limit: '1' as never, operationId: 'op-3b' }, work)).rejects.toThrow(TypeError);
     await expect(withCapacityReservation(ledger, { key: 'user-1', limit: 1, operationId: '   ' }, work)).rejects.toThrow('operationId must be a non-empty string');
+    await expect(withCapacityReservation(ledger, { key: 'user-1', limit: 1, operationId: '   ' }, work)).rejects.toThrow(RangeError);
     await expect(withCapacityReservation(ledger, { key: 42 as never, limit: 1, operationId: 'op-4' }, work)).rejects.toThrow('key must be a non-empty string');
+    await expect(withCapacityReservation(ledger, { key: 42 as never, limit: 1, operationId: 'op-4' }, work)).rejects.toThrow(TypeError);
     await expect(withCapacityReservation(ledger, { key: 'user-1', limit: 1, operationId: false as never }, work)).rejects.toThrow('operationId must be a non-empty string');
+    await expect(withCapacityReservation(ledger, { key: 'user-1', limit: 1, operationId: false as never }, work)).rejects.toThrow(TypeError);
 
     expect(ledger.reserveCalls).toEqual([]);
     expect(providerCalls).toBe(0);
@@ -435,6 +442,14 @@ describe('withCapacityReservation — strict concurrent capacity lifecycle', () 
         return { status: 'succeeded', value: 'must-not-run' };
       },
     )).rejects.toThrow('unknown reservation decision status');
+    await expect(withCapacityReservation(
+      ledger,
+      { key: 'user-1', limit: 1, operationId: 'op-1' },
+      async () => {
+        providerCalls++;
+        return { status: 'succeeded', value: 'must-not-run' };
+      },
+    )).rejects.toThrow(RangeError);
     expect(providerCalls).toBe(0);
   });
 
@@ -460,14 +475,19 @@ describe('withCapacityReservation — strict concurrent capacity lifecycle', () 
         releaseReservation: async () => undefined,
       };
       let providerCalls = 0;
-      await expect(withCapacityReservation(
-        ledger,
-        { key: 'user-1', limit: 1, operationId: 'op-1' },
-        async () => {
-          providerCalls++;
-          return { status: 'succeeded', value: 'must-not-run' };
-        },
-      )).rejects.toThrow(message);
+      const attempt = () =>
+        withCapacityReservation(
+          ledger,
+          { key: 'user-1', limit: 1, operationId: 'op-1' },
+          async () => {
+            providerCalls++;
+            return { status: 'succeeded', value: 'must-not-run' };
+          },
+        );
+      // All five identity/expiry checks reject a validly-shaped but wrong
+      // value (a mismatched id/key/operationId/expiry), so all are RangeError.
+      await expect(attempt()).rejects.toThrow(message);
+      await expect(attempt()).rejects.toThrow(RangeError);
       expect(providerCalls).toBe(0);
     }
   });
@@ -716,7 +736,7 @@ describe('withCapacityReservation — adapter errors and malformed decisions', (
     ['null', null],
     ['a string', 'acquired'],
     ['an object without status', { reservation: {} }],
-  ])('throws for a %s decision', async (_label, decision) => {
+  ])('throws a TypeError for a %s decision', async (_label, decision) => {
     const ledger: CapacityReservationLedger = {
       reserveCapacity: async () => decision as never,
       confirmReservation: async () => undefined,
@@ -725,6 +745,7 @@ describe('withCapacityReservation — adapter errors and malformed decisions', (
     await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(
       'adapter returned an invalid reservation decision',
     );
+    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(TypeError);
     expect(neverRun.calls).toBe(0);
   });
 
@@ -747,7 +768,7 @@ describe('withCapacityReservation — adapter errors and malformed decisions', (
     ['key', { key: 'other-user' }, 'reservation key does not match request'],
     ['operationId', { operationId: 'other-op' }, 'reservation operationId does not match request'],
     ['expiresAt', { expiresAt: 'soon' }, 'reservation expiresAt must be a valid ISO-8601 timestamp'],
-  ])('throws for an in-progress hold with a mismatched %s', async (_label, patch, message) => {
+  ])('throws a RangeError for an in-progress hold with a mismatched %s', async (_label, patch, message) => {
     const ledger: CapacityReservationLedger = {
       reserveCapacity: async () => ({
         status: 'operation_in_progress',
@@ -757,9 +778,10 @@ describe('withCapacityReservation — adapter errors and malformed decisions', (
       releaseReservation: async () => undefined,
     };
     await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(message);
+    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(RangeError);
   });
 
-  it('throws for a terminal decision about a different operation', async () => {
+  it('throws a RangeError for a terminal decision about a different operation', async () => {
     const ledger: CapacityReservationLedger = {
       reserveCapacity: async () => ({ status: 'operation_terminal', operationId: 'op-2' }),
       confirmReservation: async () => undefined,
@@ -768,9 +790,10 @@ describe('withCapacityReservation — adapter errors and malformed decisions', (
     await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(
       'adapter terminal decision operationId does not match request',
     );
+    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(RangeError);
   });
 
-  it('an acquired-but-malformed hold throws before work and is NOT released by the helper', async () => {
+  it('an acquired-but-malformed hold throws a RangeError before work and is NOT released by the helper', async () => {
     const ledger = new ExpiringCapacityLedger();
     const original = ledger.reserveCapacity.bind(ledger);
     ledger.reserveCapacity = async (req) => {
@@ -778,9 +801,17 @@ describe('withCapacityReservation — adapter errors and malformed decisions', (
       if (decision.status === 'acquired') decision.reservation.expiresAt = new Date(Date.now() - 1).toISOString();
       return decision;
     };
-    await expect(withCapacityReservation(ledger, request, countingWork(neverRun))).rejects.toThrow(
-      'adapter returned an expired reservation',
+    // A single call: this ledger is stateful (the reservation it just
+    // created is now "in progress"), so a second call would return
+    // operation_in_progress instead of throwing again.
+    const error: unknown = await withCapacityReservation(ledger, request, countingWork(neverRun)).then(
+      () => {
+        throw new Error('expected withCapacityReservation to reject');
+      },
+      (caught: unknown) => caught,
     );
+    expect(error).toBeInstanceOf(RangeError);
+    expect((error as Error).message).toMatch(/adapter returned an expired reservation/);
     expect(neverRun.calls).toBe(0);
     expect(ledger.releaseCalls).toEqual([]);
     expect(ledger.active.size).toBe(1); // the hold stays until your reconciliation handles it
@@ -797,11 +828,24 @@ describe('withCapacityReservation — request validation', () => {
     ['Infinity', Number.POSITIVE_INFINITY],
     ['-Infinity', Number.NEGATIVE_INFINITY],
     ['MAX_SAFE_INTEGER + 1', Number.MAX_SAFE_INTEGER + 1],
-    ['a numeric string', '3' as unknown as number],
-    ['null', null as unknown as number],
-  ])('rejects a %s limit before calling the adapter', async (_label, limit) => {
+  ])('rejects a %s limit with a RangeError before calling the adapter', async (_label, limit) => {
     await expect(withCapacityReservation(ledger, { key: 'u', limit, operationId: 'a' }, work)).rejects.toThrow(
       'limit must be a non-negative safe integer',
+    );
+    await expect(withCapacityReservation(ledger, { key: 'u', limit, operationId: 'a' }, work)).rejects.toThrow(
+      RangeError,
+    );
+  });
+
+  it.each([
+    ['a numeric string', '3' as unknown as number],
+    ['null', null as unknown as number],
+  ])('rejects a %s limit with a TypeError before calling the adapter', async (_label, limit) => {
+    await expect(withCapacityReservation(ledger, { key: 'u', limit, operationId: 'a' }, work)).rejects.toThrow(
+      'limit must be a non-negative safe integer',
+    );
+    await expect(withCapacityReservation(ledger, { key: 'u', limit, operationId: 'a' }, work)).rejects.toThrow(
+      TypeError,
     );
   });
 
@@ -814,9 +858,12 @@ describe('withCapacityReservation — request validation', () => {
     ).resolves.toMatchObject({ status: 'confirmed' });
   });
 
-  it.each(['', '   '])('rejects the key %j', async (key) => {
+  it.each(['', '   '])('rejects the key %j with a RangeError', async (key) => {
     await expect(withCapacityReservation(ledger, { key, limit: 1, operationId: 'a' }, work)).rejects.toThrow(
       'key must be a non-empty string',
+    );
+    await expect(withCapacityReservation(ledger, { key, limit: 1, operationId: 'a' }, work)).rejects.toThrow(
+      RangeError,
     );
   });
 

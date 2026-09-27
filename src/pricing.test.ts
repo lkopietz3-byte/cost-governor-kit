@@ -82,30 +82,37 @@ describe('estimateCostUsd — basic input/output', () => {
 
 describe('estimateCostUsd — validates its public numeric inputs', () => {
   describe.each(tokenBucketNames)('%s', (field) => {
-    it.each(invalidTokenValues)('rejects a %s value', (_label, value) => {
+    it.each(invalidTokenValues)('rejects a %s value with a RangeError', (_label, value) => {
       expect(() => estimateCostUsd(rates, { [field]: value })).toThrow(new RegExp(field));
+      expect(() => estimateCostUsd(rates, { [field]: value })).toThrow(RangeError);
     });
 
-    it('rejects an explicitly supplied null value', () => {
-      expect(() =>
-        estimateCostUsd(rates, { [field]: null }),
-      ).toThrow(new RegExp(field));
+    it('rejects an explicitly supplied null value with a TypeError', () => {
+      expect(() => estimateCostUsd(rates, { [field]: null })).toThrow(new RegExp(field));
+      expect(() => estimateCostUsd(rates, { [field]: null })).toThrow(TypeError);
     });
   });
 
   describe.each(rateNames)('%s', (field) => {
-    it.each(invalidRateValues)('rejects a %s value', (_label, value) => {
+    it.each(invalidRateValues)('rejects a %s value with a RangeError', (_label, value) => {
       expect(() => estimateCostUsd({ ...rates, [field]: value }, {})).toThrow(new RegExp(field));
+      expect(() => estimateCostUsd({ ...rates, [field]: value }, {})).toThrow(RangeError);
     });
   });
 
-  it('rejects non-numeric values without echoing them in errors', () => {
+  it('rejects non-numeric values with a TypeError, without echoing them in errors', () => {
     expect(() =>
       estimateCostUsd({ ...rates, inputPerMillion: 'private-rate' as unknown as number }, {}),
     ).toThrowError('estimateCostUsd: rates.inputPerMillion must be a non-negative finite number');
     expect(() =>
+      estimateCostUsd({ ...rates, inputPerMillion: 'private-rate' as unknown as number }, {}),
+    ).toThrow(TypeError);
+    expect(() =>
       estimateCostUsd(rates, { inputTokens: 'private-token-value' as unknown as number }),
     ).toThrowError('estimateCostUsd: usage.inputTokens must be a non-negative safe integer');
+    expect(() =>
+      estimateCostUsd(rates, { inputTokens: 'private-token-value' as unknown as number }),
+    ).toThrow(TypeError);
   });
 
   it('treats an explicitly undefined token bucket as the documented zero default', () => {
@@ -156,6 +163,7 @@ describe('estimateCostUsd — validates its public numeric inputs', () => {
     expect(() => estimateCostUsd(rates, providerUsage as unknown as UsageTokens)).toThrow(
       /unknown field "input_tokens"/,
     );
+    expect(() => estimateCostUsd(rates, providerUsage as unknown as UsageTokens)).toThrow(TypeError);
   });
 
   it('rejects a misspelled bucket name instead of silently dropping it', () => {
@@ -163,11 +171,13 @@ describe('estimateCostUsd — validates its public numeric inputs', () => {
     expect(() => estimateCostUsd(rates, typo as unknown as UsageTokens)).toThrow(
       /unknown field "cacheCreationTokens"/,
     );
+    expect(() => estimateCostUsd(rates, typo as unknown as UsageTokens)).toThrow(TypeError);
   });
 
   it('rejects a known bucket mixed with an unknown one', () => {
     const mixed = { inputTokens: 10, model: 'toy-model-a' };
     expect(() => estimateCostUsd(rates, mixed as unknown as UsageTokens)).toThrow(/unknown field "model"/);
+    expect(() => estimateCostUsd(rates, mixed as unknown as UsageTokens)).toThrow(TypeError);
   });
 
   it.each([
@@ -175,10 +185,11 @@ describe('estimateCostUsd — validates its public numeric inputs', () => {
     ['a number', 5],
     ['a string', 'inputTokens'],
     ['an array', [1_000_000]],
-  ])('rejects %s as the usage argument', (_label, usage) => {
+  ])('rejects %s as the usage argument with a TypeError', (_label, usage) => {
     expect(() => estimateCostUsd(rates, usage as unknown as UsageTokens)).toThrow(
       /usage must be an object of token counts/,
     );
+    expect(() => estimateCostUsd(rates, usage as unknown as UsageTokens)).toThrow(TypeError);
   });
 });
 

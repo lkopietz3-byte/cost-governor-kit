@@ -32,19 +32,23 @@
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
     },
     "./pricing": {
       "types": "./dist/pricing.d.ts",
-      "import": "./dist/pricing.js"
+      "import": "./dist/pricing.js",
+      "default": "./dist/pricing.js"
     },
     "./preCallCeiling": {
       "types": "./dist/preCallCeiling.d.ts",
-      "import": "./dist/preCallCeiling.js"
+      "import": "./dist/preCallCeiling.js",
+      "default": "./dist/preCallCeiling.js"
     },
     "./reserveConfirm": {
       "types": "./dist/reserveConfirm.d.ts",
-      "import": "./dist/reserveConfirm.js"
+      "import": "./dist/reserveConfirm.js",
+      "default": "./dist/reserveConfirm.js"
     }
   },
   "sideEffects": false,
@@ -63,7 +67,7 @@
     "test:watch": "vitest",
     "test:postgres": "vitest run src/referenceImplPostgres.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "verify:package": "node scripts/verify-package.mjs",
     "lint": "eslint . --max-warnings=0",
     "audit:dependencies": "npm audit --package-lock-only --include=dev --ignore-scripts --audit-level=low",
