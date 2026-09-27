@@ -1,87 +1,81 @@
 -- reference-impl/supabase-usage-ledger.sql
 --
--- Ready-to-copy Postgres/Supabase migration implementing the UsageLedger
--- contract from ../src/reserveConfirm.ts as two RPCs:
---   1. usage_ledger_check_under_limit  — read-only, Phase 1 (before the call)
---   2. usage_ledger_commit_usage       — atomic increment, Phase 2 (after the
---                                        call succeeds, and ONLY then)
+-- Copy-and-adapt Postgres/Supabase migration implementing the ADVISORY
+-- UsageLedger contract from ../src/reserveConfirm.ts as two RPCs:
+--   1. usage_ledger_check_under_limit  -- read-only, Phase 1 (before the call)
+--   2. usage_ledger_commit_usage       -- locked increment, Phase 2 (after the
+--                                         call succeeds, and ONLY then)
+--
+-- It does NOT implement CapacityReservationLedger (the strict
+-- reserve/confirm/release contract used by withCapacityReservation). This
+-- kit ships no implementation of that contract.
+--
+-- What was verified: this file was applied to PostgreSQL 18 (PGlite, a
+-- single-session WASM build) and each function was called for the
+-- behaviors described below, including that a role without grants cannot
+-- execute the functions. NOT verified: behavior under real concurrent
+-- sessions, and a live Supabase project's role and default-privilege setup.
 --
 -- Generalized from cruise-almanac's api/chat.js, which fixed a real slot-leak
 -- bug (AUDIT-2026-05-01-v2, finding F3-CC-E-4). Table and column names below
--- are intentionally generic ("usage_ledger", "key", "count") rather than
--- product-specific ("ai_usage", "daily_count", etc.) — this file is a
--- reference implementation of a portable contract, not a copy of any one
--- app's schema.
+-- are intentionally generic ("usage_ledger", "key", "count").
 --
 -- WHY THE TWO-PHASE SPLIT MATTERS
 -- --------------------------------
--- A naive limiter reads the count, checks it, and increments it all in one
--- step, BEFORE calling the upstream API:
---
---   check-and-increment(user)   -- one step, before the call
---   call_upstream_api()         -- if THIS fails...
---
--- If the upstream call then fails (a 5xx, a timeout, a dropped connection)
--- and the client retries — completely normal client behavior — the retry
--- burns a SECOND slot for what was really one logical usage attempt that
--- never succeeded even once. A single flaky request plus its retry can burn
--- a user's entire daily quota with zero real usage to show for it.
---
--- The fix is the two-phase split below:
+-- A naive limiter checks and increments in one step, BEFORE calling the
+-- upstream API. If the upstream call then fails (a 5xx, a timeout) and the
+-- client retries, the retry burns a SECOND slot for one logical attempt that
+-- never succeeded. The two-phase split fixes that:
 --   Phase 1 (usage_ledger_check_under_limit) runs BEFORE the upstream call.
---     It only READS the count — it never mutates state. If the caller is
---     over the limit, deny (e.g. HTTP 429) immediately. Because this phase
---     has no side effects, a client retry of a *denial* is free to re-check
---     safely.
+--     It only READS the count. If the caller is at the limit, deny (e.g.
+--     HTTP 429). A denial has no side effects, so re-checking is free.
 --   Phase 2 (usage_ledger_commit_usage) runs AFTER the upstream call has
---     ACTUALLY SUCCEEDED — never speculatively, never before the call, and
---     never if the call threw. This is the only place the counter is
---     incremented.
+--     succeeded -- never speculatively and never if the call threw. It is the
+--     only place the counter is incremented.
 --
--- A failed upstream call therefore costs at most a Phase-1 read (free) on
--- retry — never a second increment for one real usage.
---
--- CONCURRENCY: usage_ledger_commit_usage re-validates the limit at commit
--- time using `SELECT ... FOR UPDATE`, closing the race where two concurrent
--- requests both pass Phase 1 in the same tick (Phase 1 alone cannot prevent
--- that race — only Phase 2's row lock can). This mirrors cruise-almanac's
--- own comment on the fix: "Cross-tick races are still resolved at increment
--- time (the bump RPC has the row lock); the [phase] split only protects
--- against UPSTREAM-failure leakage, not concurrent same-tick claims" — i.e.
--- the two-phase split and the row-lock re-check solve two DIFFERENT
--- problems, and you need both.
+-- CONCURRENCY: WHAT THIS DOES AND DOES NOT DO
+-- --------------------------------------------
+-- Two concurrent requests can both pass Phase 1 and both make the paid
+-- upstream call. Phase 1 cannot stop that, and neither can Phase 2: by the
+-- time Phase 2 runs, the upstream call has already happened.
+-- usage_ledger_commit_usage takes a row lock (SELECT ... FOR UPDATE) and
+-- re-checks the limit, so the RECORDED count never exceeds p_limit. A commit
+-- that finds the slot already taken returns committed = false and records
+-- nothing: that call was paid for but is not counted. cruise-almanac's own
+-- comment on the fix says the same thing: "this split only protects against
+-- UPSTREAM-failure leakage, not concurrent same-tick claims". If the limit
+-- must hold under concurrency, use withCapacityReservation with an adapter
+-- that reserves capacity before the call.
 
 create table if not exists usage_ledger (
   key         text primary key,
   count       integer not null default 0,
   -- The window this count belongs to (e.g. a calendar date for a daily cap,
   -- a month string like '2026-08' for a monthly cap, or a fixed sentinel
-  -- value like 'lifetime' if you never want it to roll over). Whatever you
-  -- pass as p_window must be comparable with `<>` and sortable is not
-  -- required.
+  -- such as 'lifetime'). Only equality (`<>`) is used on it.
   window_key  text not null,
   updated_at  timestamptz not null default now()
 );
 
+-- Deny direct table access to API roles. With RLS enabled and no policies,
+-- roles that do not bypass RLS read and write nothing; the SECURITY DEFINER
+-- functions below still work because they run as the table owner. (Supabase
+-- grants API roles table privileges in `public` by default; this is the
+-- guard for that. Not tested against a live Supabase project.)
+alter table usage_ledger enable row level security;
+
 comment on table usage_ledger is
-  'Generic per-key usage counter for the reserve-then-confirm pattern '
-  '(see src/reserveConfirm.ts). "key" is caller-defined -- e.g. a user id '
-  'for a global cap, or "<user_id>:<feature>" for a per-feature cap. '
-  '"window_key" is what makes the count reset -- e.g. today''s date for a '
-  'daily cap. This table intentionally has no app-specific columns: the '
-  'contract in reserveConfirm.ts is database-agnostic, and this is only '
-  'the Postgres/Supabase reference implementation of it.';
+  'Generic per-key usage counter for the advisory check-then-commit pattern '
+  '(see src/reserveConfirm.ts). "key" is caller-defined, e.g. a user id or '
+  '"<user_id>:<feature>". "window_key" is what makes the count reset, e.g. '
+  'today''s date for a daily cap.';
 
 -- Phase 1: check WITHOUT incrementing.
 --
 -- If no row exists yet for this key, or the stored window_key doesn't match
--- p_window (the window has rolled over -- e.g. it's a new day), the caller
--- is treated as under the limit at count 0. Note this does NOT write
--- anything -- the actual reset is persisted lazily by
--- usage_ledger_commit_usage the next time it's called for this key. A
--- read-only check must never mutate state, or a client that checks
--- repeatedly without ever calling commit (e.g. because every one of its
--- calls happens to fail) would still be silently rolling the window forward.
+-- p_window (the window has rolled over), the caller is treated as being at
+-- count 0. Nothing is written: the reset is persisted lazily by
+-- usage_ledger_commit_usage. A NULL p_limit returns allowed = NULL.
 create or replace function usage_ledger_check_under_limit(
   p_key    text,
   p_limit  integer,
@@ -98,9 +92,7 @@ begin
   select * into v_row from usage_ledger where key = p_key;
 
   if v_row.key is null or v_row.window_key <> p_window then
-    -- No row yet, or stale window (e.g. yesterday's count) -- treat as a
-    -- fresh window at count 0, without writing anything.
-    return query select true, 0;
+    return query select (0 < p_limit), 0;
     return;
   end if;
 
@@ -109,17 +101,16 @@ end;
 $$;
 
 comment on function usage_ledger_check_under_limit is
-  'Phase 1 of reserve-then-confirm. READ-ONLY -- never increments. Call '
-  'this BEFORE making the guarded (e.g. upstream LLM) call. If allowed is '
-  'false, deny the request (e.g. HTTP 429) with zero side effects.';
+  'Phase 1 of check-then-commit. READ-ONLY. Call BEFORE the guarded call. '
+  'If allowed is not true, deny the request with zero side effects.';
 
--- Phase 2: atomic increment, called ONLY after the guarded call succeeds.
+-- Phase 2: locked increment, called ONLY after the guarded call succeeds.
 --
--- Uses INSERT ... ON CONFLICT plus SELECT ... FOR UPDATE so the
--- read-check-write is a single atomic unit under the row lock, closing the
--- race between two concurrent requests that both passed Phase 1 in the same
--- tick. Re-validates window_key so a window rollover is safely persisted
--- here (the one place that's allowed to mutate the row).
+-- INSERT ... ON CONFLICT plus SELECT ... FOR UPDATE make the
+-- read-check-write a single unit under the row lock, so the recorded count
+-- never exceeds p_limit. Returns committed = false (and records nothing)
+-- when the limit is already reached; see CONCURRENCY above for what that
+-- means. A window rollover is persisted here.
 create or replace function usage_ledger_commit_usage(
   p_key    text,
   p_limit  integer,
@@ -140,8 +131,13 @@ begin
   select * into v_row from usage_ledger where key = p_key for update;
 
   if v_row.window_key <> p_window then
-    -- Window rolled over since the last commit (e.g. it's a new day) --
-    -- this commit is the first usage of the new window.
+    -- Window rolled over since the last commit: this is the first usage of
+    -- the new window, unless the limit allows none at all.
+    if not (0 < p_limit) then
+      return query select false, 0;
+      return;
+    end if;
+
     update usage_ledger
        set count = 1, window_key = p_window, updated_at = now()
      where key = p_key
@@ -151,12 +147,10 @@ begin
     return;
   end if;
 
-  if v_row.count >= p_limit then
-    -- A concurrent request already filled the last slot between this
-    -- caller's own Phase 1 check and this Phase 2 commit. The caller's
-    -- guarded call already happened by this point (rare, and the cost of
-    -- it is real and already incurred) -- but we refuse to record MORE
-    -- usage than the limit allows, so the ledger itself never over-counts.
+  if not (v_row.count < p_limit) then
+    -- The slot was taken between this caller's Phase 1 and this Phase 2.
+    -- The guarded call already happened and its cost is real; it is not
+    -- recorded, so the ledger undercounts real usage in this case.
     return query select false, v_row.count;
     return;
   end if;
@@ -171,49 +165,78 @@ end;
 $$;
 
 comment on function usage_ledger_commit_usage is
-  'Phase 2 of reserve-then-confirm. Atomically increments. Call this ONLY '
-  'after the guarded call has actually succeeded -- never speculatively, '
-  'never before the call, and never if the call threw.';
+  'Phase 2 of check-then-commit. Locked increment. Call ONLY after the '
+  'guarded call has succeeded. committed = false means the call was not '
+  'recorded because the limit was already reached.';
 
--- Adjust these grants to your own role model. At minimum, the role your
--- serverless/edge function authenticates as (commonly `service_role` on
--- Supabase) needs EXECUTE on both functions.
+-- Postgres grants EXECUTE on new functions to PUBLIC by default. Because
+-- these functions are SECURITY DEFINER, that would let any role (including
+-- an anonymous API role) increment anyone's counter. Revoke it, then grant
+-- only the role your server-side code uses (commonly `service_role` on
+-- Supabase). Adjust to your own role model.
+revoke execute on function usage_ledger_check_under_limit(text, integer, text) from public;
+revoke execute on function usage_ledger_commit_usage(text, integer, text) from public;
+
+do $$
+declare
+  r text;
+begin
+  -- Supabase's API roles, when present. Skipped on plain Postgres.
+  foreach r in array array['anon', 'authenticated'] loop
+    if exists (select 1 from pg_roles where rolname = r) then
+      execute format('revoke execute on function usage_ledger_check_under_limit(text, integer, text) from %I', r);
+      execute format('revoke execute on function usage_ledger_commit_usage(text, integer, text) from %I', r);
+    end if;
+  end loop;
+end;
+$$;
+
 grant execute on function usage_ledger_check_under_limit(text, integer, text) to service_role;
 grant execute on function usage_ledger_commit_usage(text, integer, text) to service_role;
 
 -- ---------------------------------------------------------------------------
--- Example UsageLedger adapter (TypeScript) implementing src/reserveConfirm.ts
--- against these two RPCs via the Supabase client. Copy into your app and
--- adjust the client import/init to match your setup.
+-- Example UsageLedger adapter (TypeScript) for these two RPCs via the
+-- Supabase client. A sketch: it type-checks against this package's
+-- UsageLedger types with a stubbed client, but was not run against Supabase.
+--
+-- UsageLedger.commitUsage(key) receives no limit, so the adapter closes over
+-- the limit. Build one adapter per (window, limit) and pass the SAME limit to
+-- withReserveConfirm; otherwise Phase 2 re-checks a different limit.
 --
 --   import type { UsageLedger } from 'cost-governor-kit/reserveConfirm';
 --   import { createClient } from '@supabase/supabase-js';
 --
 --   const supabase = createClient(url, serviceRoleKey);
 --
---   export function supabaseUsageLedger(windowKey: string): UsageLedger {
+--   export function supabaseUsageLedger(windowKey: string, limit: number): UsageLedger {
 --     return {
---       async checkUnderLimit(key, limit) {
+--       async checkUnderLimit(key) {
 --         const { data, error } = await supabase.rpc('usage_ledger_check_under_limit', {
 --           p_key: key,
 --           p_limit: limit,
 --           p_window: windowKey,
 --         });
 --         if (error) throw error;
---         return Boolean(data?.[0]?.allowed);
+--         return data?.[0]?.allowed === true;
 --       },
 --       async commitUsage(key) {
---         const { error } = await supabase.rpc('usage_ledger_commit_usage', {
+--         const { data, error } = await supabase.rpc('usage_ledger_commit_usage', {
 --           p_key: key,
---           p_limit: Number.MAX_SAFE_INTEGER, // re-check uses the caller's real limit; see note below
+--           p_limit: limit,
 --           p_window: windowKey,
 --         });
 --         if (error) throw error;
+--         if (data?.[0]?.committed !== true) {
+--           // The paid call already happened but was not recorded (limit
+--           // reached concurrently). Don't throw: withReserveConfirm would
+--           // discard the successful result. Log it for reconciliation.
+--           console.warn(`usage not recorded for ${key}: limit ${limit} reached concurrently`);
+--         }
 --       },
 --     };
 --   }
 --
--- Note: pass the SAME p_limit to commitUsage that you passed to
--- checkUnderLimit for that request -- it's what lets Phase 2 close the
--- concurrent-same-tick race described above. The Number.MAX_SAFE_INTEGER in
--- the sketch above is a placeholder; thread the real limit through instead.
+--   const limit = 5;
+--   const result = await withReserveConfirm(
+--     supabaseUsageLedger(today, limit), `${userId}:${today}`, limit, () => callYourLlmApi(prompt),
+--   );
