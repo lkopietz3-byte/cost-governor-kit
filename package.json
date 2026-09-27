@@ -68,7 +68,8 @@
     "lint": "eslint . --max-warnings=0",
     "audit:dependencies": "npm audit --package-lock-only --include=dev --ignore-scripts --audit-level=low",
     "prepare": "npm run build",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run build && npm run verify:package"
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build && npm run verify:package",
+    "prepublishOnly": "npm run verify"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.8",

@@ -71,9 +71,11 @@ proves anything about concurrent Postgres sessions.
 
 ## Release and rollback
 
-The package has never been published; the version stays `0.1.0` until a
-release. Before publishing: run `npm run verify` on the release commit, check
-the `npm pack --dry-run` file list, and check the downstream `honesty-mcp`
-build, which depends on this kit through a `file:` path. Rollback for
+`npm run verify` (lint, typecheck, test, build, verify:package) runs
+automatically before publish via the `prepublishOnly` script. To cut a
+release: bump `version` in `package.json`, add a `CHANGELOG.md` entry, check
+the `npm pack --dry-run` file list and the downstream `honesty-mcp` build,
+then `npm publish`. npm allows `npm unpublish` only within 72 hours of
+publishing, so prefer publishing a fixed patch release. Rollback for
 consumers is pinning the previous version or commit; do not roll back past a
 validation fix without restoring an equivalent check.

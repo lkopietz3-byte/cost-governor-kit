@@ -29,16 +29,13 @@ top of each `src/*.ts` file names the incident.
 
 ## Install
 
-Not published to npm yet. Install from GitHub (the repository must be readable
-by your account):
-
 ```bash
-npm install github:lkopietz3-byte/cost-governor-kit
+npm install cost-governor-kit
 ```
 
-npm clones the repo and builds `dist/` through the package's `prepare` script.
-Recent npm versions may warn that `prepare` is not covered by `allowScripts`.
-ESM only, Node 20 or later, no runtime dependencies. MIT licensed.
+Or build from source: clone the repository, then run `npm ci` and
+`npm run build`. ESM only, Node 20 or later, no runtime dependencies. MIT
+licensed.
 
 ## Quickstart
 
