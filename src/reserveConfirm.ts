@@ -286,7 +286,7 @@ export async function withCapacityReservation<T>(
   validateReserveCapacityRequest(request);
   const decision = await ledger.reserveCapacity(request);
   if (!decision || typeof decision !== "object" || !("status" in decision)) {
-    throw new Error("withCapacityReservation: adapter returned an invalid reservation decision");
+    throw new TypeError("withCapacityReservation: adapter returned an invalid reservation decision");
   }
   const decisionStatus: unknown = (decision as { status?: unknown }).status;
   if (decision.status === "denied") return { status: "denied", reason: decision.reason };
@@ -296,12 +296,12 @@ export async function withCapacityReservation<T>(
   }
   if (decision.status === "operation_terminal") {
     if (decision.operationId !== request.operationId) {
-      throw new Error("withCapacityReservation: adapter terminal decision operationId does not match request");
+      throw new RangeError("withCapacityReservation: adapter terminal decision operationId does not match request");
     }
     return { status: "operation_terminal", operationId: decision.operationId, reason: decision.reason };
   }
   if (decisionStatus !== "acquired") {
-    throw new Error(`withCapacityReservation: adapter returned unknown reservation decision status ${String(decisionStatus)}`);
+    throw new RangeError(`withCapacityReservation: adapter returned unknown reservation decision status ${String(decisionStatus)}`);
   }
 
   const { reservation } = decision;
@@ -339,14 +339,23 @@ export async function withCapacityReservation<T>(
 }
 
 function validateReserveCapacityRequest(request: ReserveCapacityRequest): void {
+  if (typeof request.limit !== "number") {
+    throw new TypeError("withCapacityReservation: limit must be a non-negative safe integer");
+  }
   if (!Number.isSafeInteger(request.limit) || request.limit < 0) {
-    throw new Error("withCapacityReservation: limit must be a non-negative safe integer");
+    throw new RangeError("withCapacityReservation: limit must be a non-negative safe integer");
   }
-  if (typeof request.key !== "string" || !request.key.trim()) {
-    throw new Error("withCapacityReservation: key must be a non-empty string");
+  if (typeof request.key !== "string") {
+    throw new TypeError("withCapacityReservation: key must be a non-empty string");
   }
-  if (typeof request.operationId !== "string" || !request.operationId.trim()) {
-    throw new Error("withCapacityReservation: operationId must be a non-empty string");
+  if (!request.key.trim()) {
+    throw new RangeError("withCapacityReservation: key must be a non-empty string");
+  }
+  if (typeof request.operationId !== "string") {
+    throw new TypeError("withCapacityReservation: operationId must be a non-empty string");
+  }
+  if (!request.operationId.trim()) {
+    throw new RangeError("withCapacityReservation: operationId must be a non-empty string");
   }
 }
 
@@ -356,22 +365,28 @@ function validateReservationIdentity(
   requireUnexpired = true,
 ): void {
   if (!reservation || typeof reservation !== "object") {
-    throw new Error("withCapacityReservation: adapter returned an invalid reservation");
+    throw new TypeError("withCapacityReservation: adapter returned an invalid reservation");
   }
-  if (typeof reservation.id !== "string" || !reservation.id.trim()) {
-    throw new Error("withCapacityReservation: reservation id must be a non-empty string");
+  if (typeof reservation.id !== "string") {
+    throw new TypeError("withCapacityReservation: reservation id must be a non-empty string");
+  }
+  if (!reservation.id.trim()) {
+    throw new RangeError("withCapacityReservation: reservation id must be a non-empty string");
   }
   if (reservation.key !== request.key) {
-    throw new Error("withCapacityReservation: reservation key does not match request");
+    throw new RangeError("withCapacityReservation: reservation key does not match request");
   }
   if (reservation.operationId !== request.operationId) {
-    throw new Error("withCapacityReservation: reservation operationId does not match request");
+    throw new RangeError("withCapacityReservation: reservation operationId does not match request");
   }
-  if (typeof reservation.expiresAt !== "string" || !Number.isFinite(Date.parse(reservation.expiresAt))) {
-    throw new Error("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+  if (typeof reservation.expiresAt !== "string") {
+    throw new TypeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+  }
+  if (!Number.isFinite(Date.parse(reservation.expiresAt))) {
+    throw new RangeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
   }
   if (requireUnexpired && Date.parse(reservation.expiresAt) <= Date.now()) {
-    throw new Error("withCapacityReservation: adapter returned an expired reservation");
+    throw new RangeError("withCapacityReservation: adapter returned an expired reservation");
   }
 }
 

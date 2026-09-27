@@ -94,33 +94,51 @@ export interface PreCallCeilingResult {
  * // ...only now make the call, then add its real cost to runningTotal.
  * ```
  *
- * @throws Error when `rates` is missing or invalid, `ceilingUsd` or
- *   `spentSoFarUsd` is not a finite number >= 0 (these messages include the
- *   rejected value), the usage estimate is invalid, or the total is not finite.
- *   A null or undefined `check` throws a TypeError.
+ * @throws TypeError when `check`/`rates` is missing or `rates.inputPerMillion`/
+ *   `outputPerMillion` is not a number, or `ceilingUsd`/`spentSoFarUsd` is not
+ *   a number.
+ * @throws RangeError when a present, correctly-typed `rates` field,
+ *   `ceilingUsd`, or `spentSoFarUsd` is negative or non-finite (these
+ *   messages include the rejected value), the usage estimate is invalid
+ *   (see {@link estimateCostUsd}), or the projected total is not finite.
  */
 export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingResult {
   if (
     !check.rates ||
     typeof check.rates.inputPerMillion !== 'number' ||
-    typeof check.rates.outputPerMillion !== 'number' ||
-    !Number.isFinite(check.rates.inputPerMillion) ||
-    !Number.isFinite(check.rates.outputPerMillion) ||
-    check.rates.inputPerMillion < 0 ||
-    check.rates.outputPerMillion < 0
+    typeof check.rates.outputPerMillion !== 'number'
   ) {
-    throw new Error(
+    throw new TypeError(
       'checkPreCallCeiling: `rates` (with non-negative finite numeric inputPerMillion/outputPerMillion) is required. ' +
         'This library never defaults or hardcodes a price — pass the live rate explicitly, ' +
         'the same way classify-batch.mjs takes --input-rate/--output-rate as CLI arguments, ' +
         'so a stale price cannot silently corrupt the spend cap.',
     );
   }
+  if (
+    !Number.isFinite(check.rates.inputPerMillion) ||
+    !Number.isFinite(check.rates.outputPerMillion) ||
+    check.rates.inputPerMillion < 0 ||
+    check.rates.outputPerMillion < 0
+  ) {
+    throw new RangeError(
+      'checkPreCallCeiling: `rates` (with non-negative finite numeric inputPerMillion/outputPerMillion) is required. ' +
+        'This library never defaults or hardcodes a price — pass the live rate explicitly, ' +
+        'the same way classify-batch.mjs takes --input-rate/--output-rate as CLI arguments, ' +
+        'so a stale price cannot silently corrupt the spend cap.',
+    );
+  }
+  if (typeof check.ceilingUsd !== 'number') {
+    throw new TypeError(`checkPreCallCeiling: ceilingUsd must be a non-negative finite number, got ${String(check.ceilingUsd)}`);
+  }
   if (!Number.isFinite(check.ceilingUsd) || check.ceilingUsd < 0) {
-    throw new Error(`checkPreCallCeiling: ceilingUsd must be a non-negative finite number, got ${check.ceilingUsd}`);
+    throw new RangeError(`checkPreCallCeiling: ceilingUsd must be a non-negative finite number, got ${check.ceilingUsd}`);
+  }
+  if (typeof check.spentSoFarUsd !== 'number') {
+    throw new TypeError(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${String(check.spentSoFarUsd)}`);
   }
   if (!Number.isFinite(check.spentSoFarUsd) || check.spentSoFarUsd < 0) {
-    throw new Error(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${check.spentSoFarUsd}`);
+    throw new RangeError(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${check.spentSoFarUsd}`);
   }
 
   const projectedNextCallCostUsd = estimateCostUsd(check.rates, check.estimatedNextCallUsage);

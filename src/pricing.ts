@@ -133,9 +133,16 @@ export interface UsageTokens {
  * @param rates - Caller-supplied rates; there is no default. Both must be finite and >= 0.
  * @param usage - Token counts; see {@link UsageTokens}.
  * @returns Cost in USD, rounded to the nearest micro-dollar.
- * @throws Error for invalid rates, a non-object or array `usage`, an unknown
- *   usage key, an invalid token count, or a non-finite result. Error messages
- *   name the field but never echo the rejected value.
+ * @throws TypeError if `rates` has a non-numeric field, `usage` is not a
+ *   plain object (including `null`, an array, or a primitive), or `usage`
+ *   has a field of the wrong type.
+ * @throws RangeError if a rate or token count is negative, non-finite (`NaN`
+ *   or `Infinity`), not a safe integer (token counts only), or `usage` has a
+ *   field outside the known set. Error messages name the field but never
+ *   echo the rejected value.
+ * @throws Error (not TypeError/RangeError) only for the internal "result
+ *   must remain finite" safety net below — that guards the computed cost,
+ *   not a single bad input field.
  */
 export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
   assertRate('inputPerMillion', rates?.inputPerMillion);
@@ -144,13 +151,13 @@ export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
     assertRate('cacheReadPerMillion', rates.cacheReadPerMillion);
   }
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
-    throw new Error('estimateCostUsd: usage must be an object of token counts');
+    throw new TypeError('estimateCostUsd: usage must be an object of token counts');
   }
   // An unrecognized key (a provider's snake_case field, a typo) would
   // otherwise be ignored and its tokens priced at $0.
   for (const key of Object.keys(usage)) {
     if (!USAGE_FIELDS.includes(key as keyof UsageTokens)) {
-      throw new Error(
+      throw new TypeError(
         `estimateCostUsd: usage has unknown field ${JSON.stringify(key)}; ` +
           `expected only ${USAGE_FIELDS.join(', ')}`,
       );
@@ -200,8 +207,11 @@ const USAGE_FIELDS: ReadonlyArray<keyof UsageTokens> = [
 ];
 
 function assertRate(field: keyof ModelRates, value: number): void {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
-    throw new Error(`estimateCostUsd: rates.${field} must be a non-negative finite number`);
+  if (typeof value !== 'number') {
+    throw new TypeError(`estimateCostUsd: rates.${field} must be a non-negative finite number`);
+  }
+  if (!Number.isFinite(value) || value < 0) {
+    throw new RangeError(`estimateCostUsd: rates.${field} must be a non-negative finite number`);
   }
 }
 
@@ -210,8 +220,11 @@ function tokenCountOrZero(usage: UsageTokens, field: keyof UsageTokens): number 
   if (value === undefined) {
     return 0;
   }
+  if (typeof value !== 'number') {
+    throw new TypeError(`estimateCostUsd: usage.${field} must be a non-negative safe integer`);
+  }
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error(`estimateCostUsd: usage.${field} must be a non-negative safe integer`);
+    throw new RangeError(`estimateCostUsd: usage.${field} must be a non-negative safe integer`);
   }
   return value;
 }
@@ -248,7 +261,11 @@ export function formatRatesForLog(rates: ModelRates): string {
  * entry is the table's own object, not a copy, and is not validated here;
  * {@link estimateCostUsd} validates rates when it uses them.
  *
- * @throws Error naming the model and listing the table's known models.
+ * @throws Error naming the model and listing the table's known models. Plain
+ *   `Error`, not `TypeError`/`RangeError`: `model` isn't malformed input,
+ *   it's a validly-shaped key that has no configured entry — the same
+ *   "unconfigured lookup key" case trust-core's `identified.signalWeight`
+ *   also leaves as a plain `Error`.
  */
 export function getRatesOrThrow(table: PricingTable, model: string): ModelRates {
   // Own keys only: a plain-object table inherits `constructor`, `toString`,
