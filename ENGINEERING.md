@@ -114,6 +114,11 @@ not, even after an unpublish. Treat unpublish as unavailable: prefer fixing forw
 patch version, and use `npm deprecate <name>@"<range>" "<message>"` to warn consumers off a
 bad release while it stays installable for anyone already pinned to it.
 
+Before publishing, also check the `npm pack --dry-run` file list and the downstream
+`honesty-mcp` build, since that server consumes this package's subpath exports directly.
+Rollback for consumers is pinning the previous version or commit; do not roll back past
+a validation fix without restoring an equivalent check.
+
 ### Runtime support policy
 
 - **Supported (recommended for production):** Node 22 and 24 LTS; Node 26 current.
