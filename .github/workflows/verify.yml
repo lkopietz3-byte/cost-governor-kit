@@ -40,6 +40,8 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
+      - name: Check types (attw)
+        run: npm run attw
       - name: Verify the installable package
         run: npm run verify:package
 
