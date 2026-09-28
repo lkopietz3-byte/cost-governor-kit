@@ -6,10 +6,13 @@
 // What it does, in order:
 //   1. `npm pack` the built package (run `npm run build` first).
 //   2. Fail if the tarball contains anything outside the intended file set
-//      (tests, configs, CI files, env files, node_modules).
+//      (tests, configs, CI files, env files, node_modules), or ships a source
+//      map whose sources resolve to nothing a consumer received.
 //   3. Install that tarball into an empty temp project, offline, no scripts.
 //   4. Import every `exports` entry by its public specifier, and check that
-//      each declared types file exists.
+//      each declared types file exists. If every entry declares a "default" or
+//      "require" condition, require() each one too and check it exposes the
+//      same names as import() (on Node versions with require(esm) support).
 //   5. Compare the exported names to the committed api-surface.json, so API
 //      changes are always a deliberate diff.
 //   6. Run scripts/consumer-probe.mjs (required, kit-specific) from the
@@ -77,11 +80,11 @@ assert.ok(packed.some((p) => p.startsWith('dist/')), 'Tarball has no dist/ outpu
 
 // 2b. Every source map's `sources` entry must resolve for a consumer: either
 // that source file is itself shipped in the tarball, or the map embeds its
-// text via a non-empty `sourcesContent` entry. This kit currently emits no
-// source maps at all (see README/ENGINEERING), so this is a no-op today; it
-// guards against a future tsconfig change (or a stale dist/ tsc did not
-// clean up after one) shipping a map nothing can resolve.
+// text via a non-empty `sourcesContent` entry. `tsc` does not delete outputs
+// it stopped emitting (e.g. a stale .d.ts.map from before declarationMap was
+// turned off), so this also catches dist/ not being rebuilt from clean.
 const packedSet = new Set(packed);
+const mapProblems = [];
 for (const mapPath of packed.filter((p) => p.endsWith('.map'))) {
   const map = JSON.parse(readFileSync(join(root, mapPath), 'utf8'));
   const sources = Array.isArray(map.sources) ? map.sources : [];
@@ -97,13 +100,16 @@ for (const mapPath of packed.filter((p) => p.endsWith('.map'))) {
     }
     const shipped = packedSet.has(resolved.join('/'));
     const embedded = typeof sourcesContent[i] === 'string' && sourcesContent[i].length > 0;
-    assert.ok(
-      shipped || embedded,
-      `${mapPath}: source "${src}" is neither shipped in the tarball nor embedded via sourcesContent ` +
-        `(stale dist/? rebuild from clean, or check inlineSources)`,
-    );
+    if (!shipped && !embedded) {
+      mapProblems.push(`${mapPath}: source "${src}" resolves to "${resolved.join('/')}", which is neither shipped nor embedded via sourcesContent`);
+    }
   });
 }
+assert.deepEqual(
+  mapProblems,
+  [],
+  `Broken source map(s) in the tarball (stale dist/? rebuild from clean, or check inlineSources):\n${mapProblems.join('\n')}`,
+);
 
 // 3. Install into a clean consumer --------------------------------------------
 run('npm', [
@@ -132,6 +138,31 @@ for (const spec of ${JSON.stringify(entries)}) {
 console.log(JSON.stringify(out));
 `);
 const surface = JSON.parse(run(process.execPath, ['surface.mjs'], consumer));
+
+// 4b. require() agrees with import() for every exports entry -------------------------
+// A "default" or "require" condition next to "import" promises CommonJS consumers
+// can require() the entry on Node versions with require(esm) (20.19+/22.12+).
+// A .cjs file is CommonJS regardless of the consumer's "type", so no extra project.
+const exportTargets = pkg.exports && typeof pkg.exports === 'object' ? Object.values(pkg.exports) : [];
+const declaresCommonJs = exportTargets.length > 0 && exportTargets.every(
+  (target) => target !== null && typeof target === 'object' && ('default' in target || 'require' in target),
+);
+let requireSurfaceChecked = false;
+if (declaresCommonJs && supportsRequireEsm(process.versions.node)) {
+  writeFileSync(join(consumer, 'require-surface.cjs'), `
+const assert = require('node:assert/strict');
+const out = {};
+for (const spec of ${JSON.stringify(entries)}) {
+  const keys = Object.keys(require(spec)).sort();
+  assert.ok(keys.length > 0, \`require(\${spec}) returned no exports\`);
+  out[spec] = keys;
+}
+console.log(JSON.stringify(out));
+`);
+  const requireSurface = JSON.parse(run(process.execPath, ['require-surface.cjs'], consumer));
+  assert.deepEqual(requireSurface, surface, 'require() and import() disagree on the exported names for one or more entries');
+  requireSurfaceChecked = true;
+}
 
 // 5. Public API surface is a deliberate diff ---------------------------------------
 const surfacePath = join(root, 'api-surface.json');
@@ -205,5 +236,6 @@ console.log(JSON.stringify({
   importedEntries: entries,
   apiSurfaceChecked: !updateApi,
   commonjsChecked,
+  requireSurfaceChecked,
   strictDeclarationsChecked: typeChecked,
 }));
