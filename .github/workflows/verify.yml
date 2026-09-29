@@ -52,7 +52,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        node: ['20', '22', '24']
+        # 20.19.0 and 22.12.0 are the documented require(esm) floors, pinned
+        # exactly. The unpinned 20 and 22 track the latest release of each line.
+        node: ['20', '20.19.0', '22', '22.12.0', '24']
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

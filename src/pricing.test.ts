@@ -1,3 +1,4 @@
+import { runInNewContext } from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   CACHE_CREATION_1H_MULTIPLIER,
@@ -449,5 +450,312 @@ describe('getRatesOrThrow', () => {
     const bare = Object.assign(Object.create(null) as PricingTable, { 'toy-model-a': rates });
     expect(getRatesOrThrow(bare, 'toy-model-a')).toBe(rates);
     expect(() => getRatesOrThrow(bare, 'toy-model-b')).toThrow(/no pricing entry/i);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CGK-001: every record must be plain (or null-prototype); nothing that is not
+// a plain record may be read as "zero usage" or "empty table".
+// ---------------------------------------------------------------------------
+
+class UsageClass {
+  inputTokens = 1_000_000;
+}
+class RatesClass {
+  inputPerMillion = 3;
+  outputPerMillion = 15;
+}
+
+const nonPlainRecords: ReadonlyArray<readonly [string, unknown]> = [
+  ['a Map', new Map([['inputTokens', 1_000_000]])],
+  ['a Set', new Set(['inputTokens'])],
+  ['a Date', new Date(0)],
+  ['a RegExp', /inputTokens/],
+  ['a class instance', new UsageClass()],
+  ['a function', () => 1],
+  ['a boxed number', Object.assign(Object(1), { inputTokens: 1 })],
+];
+
+describe('estimateCostUsd — usage must be a plain or null-prototype object (CGK-001)', () => {
+  it.each(nonPlainRecords)('rejects %s as usage with a TypeError instead of pricing it at $0', (_label, usage) => {
+    expect(() => estimateCostUsd(rates, usage as UsageTokens)).toThrow(TypeError);
+    expect(() => estimateCostUsd(rates, usage as UsageTokens)).toThrow(/usage must be an object of token counts/);
+  });
+
+  it('rejects an object whose prototype is an ordinary object', () => {
+    const usage = Object.create({ inputTokens: 5 }) as UsageTokens;
+    expect(() => estimateCostUsd(rates, usage)).toThrow(TypeError);
+  });
+
+  it('still accepts an ordinary object, a null-prototype dictionary and an empty record', () => {
+    const bare = Object.assign(Object.create(null) as UsageTokens, { inputTokens: 1_000_000 });
+    expect(estimateCostUsd(rates, { inputTokens: 1_000_000 })).toBe(3);
+    expect(estimateCostUsd(rates, bare)).toBe(3);
+    expect(estimateCostUsd(rates, {})).toBe(0);
+  });
+
+  it('accepts an ordinary record made in another realm (same shape, different Object.prototype)', () => {
+    const foreign = runInNewContext('({ inputTokens: 1000000 })') as UsageTokens;
+    expect(Object.getPrototypeOf(foreign)).not.toBe(Object.prototype);
+    expect(estimateCostUsd(rates, foreign)).toBe(3);
+  });
+});
+
+describe('estimateCostUsd — rates must be a plain or null-prototype object (CGK-001)', () => {
+  it.each(nonPlainRecords)('rejects %s as rates with a TypeError', (_label, badRates) => {
+    expect(() => estimateCostUsd(badRates as ModelRates, {})).toThrow(TypeError);
+    expect(() => estimateCostUsd(badRates as ModelRates, {})).toThrow(/rates must be an object/);
+  });
+
+  it('rejects a class instance even when its fields are valid', () => {
+    expect(() => estimateCostUsd(new RatesClass(), { inputTokens: 1 })).toThrow(TypeError);
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a number', 3],
+    ['an array', [3, 15]],
+  ])('rejects %s as rates with a TypeError that names rates', (_label, badRates) => {
+    expect(() => estimateCostUsd(badRates as unknown as ModelRates, {})).toThrow(TypeError);
+    expect(() => estimateCostUsd(badRates as unknown as ModelRates, {})).toThrow(/rates must be an object/);
+  });
+
+  it('still accepts a null-prototype rates record', () => {
+    const bare = Object.assign(Object.create(null) as ModelRates, { inputPerMillion: 3, outputPerMillion: 15 });
+    expect(estimateCostUsd(bare, { inputTokens: 1_000_000 })).toBe(3);
+  });
+});
+
+describe('estimateCostUsd — caller input is read once, then validated and priced from the same copy', () => {
+  it('prices a rate getter that answers differently on a second read using the value it validated', () => {
+    let reads = 0;
+    const flipping = {
+      get inputPerMillion(): number {
+        reads++;
+        return reads === 1 ? 3 : -1_000;
+      },
+      outputPerMillion: 15,
+    };
+    expect(estimateCostUsd(flipping, { inputTokens: 1_000_000 })).toBe(3);
+    expect(reads).toBe(1);
+  });
+
+  it('reads outputPerMillion and cacheReadPerMillion once each', () => {
+    const reads = { output: 0, cacheRead: 0 };
+    const counted: ModelRates = {
+      inputPerMillion: 10,
+      get outputPerMillion(): number {
+        reads.output++;
+        return 50;
+      },
+      get cacheReadPerMillion(): number {
+        reads.cacheRead++;
+        return 0.25;
+      },
+    };
+    expect(estimateCostUsd(counted, { cacheReadTokens: 1_000_000, outputTokens: 1_000_000 })).toBe(50.25);
+    expect(reads).toEqual({ output: 1, cacheRead: 1 });
+  });
+
+  it('reads each usage field once', () => {
+    const reads: Record<string, number> = {};
+    const counted = {} as UsageTokens;
+    for (const name of tokenBucketNames) {
+      Object.defineProperty(counted, name, {
+        enumerable: true,
+        get(): number {
+          reads[name] = (reads[name] ?? 0) + 1;
+          return 1;
+        },
+      });
+    }
+    estimateCostUsd(rates, counted);
+    expect(reads).toEqual({
+      inputTokens: 1,
+      outputTokens: 1,
+      cacheReadTokens: 1,
+      cacheCreation5mTokens: 1,
+      cacheCreation1hTokens: 1,
+    });
+  });
+});
+
+describe('estimateCostUsd — error text stays safe and never echoes a rejected value', () => {
+  it('escapes control and bidi characters in an unknown usage key', () => {
+    const usage = { 'evil\n\u001b[31m\u202e\u2066': 1 } as unknown as UsageTokens;
+    let message = '';
+    try {
+      estimateCostUsd(rates, usage);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/unknown field/);
+    expect(message).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+    expect(message).toContain('\\u{202E}');
+  });
+});
+
+describe('formatRatesForLog — plain records, one read, safe text', () => {
+  it.each(nonPlainRecords)('rejects %s with a TypeError', (_label, badRates) => {
+    expect(() => formatRatesForLog(badRates as ModelRates)).toThrow(TypeError);
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+  ])('rejects %s with a TypeError', (_label, badRates) => {
+    expect(() => formatRatesForLog(badRates as unknown as ModelRates)).toThrow(TypeError);
+    expect(() => formatRatesForLog(badRates as unknown as ModelRates)).toThrow(/rates must be an object/);
+  });
+
+  it('cannot be made to print a terminal escape or a forged line through a string rate', () => {
+    const line = formatRatesForLog({
+      inputPerMillion: '\u001b[2J\nFAKE' as unknown as number,
+      outputPerMillion: '\u202egnp' as unknown as number,
+    });
+    expect(line).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+    expect(line).toContain('in, ');
+  });
+
+  it('does not run a rate object\'s toString or throw for a hostile rate', () => {
+    const hostile = {
+      toString(): string {
+        throw new RangeError('boom');
+      },
+    };
+    expect(() =>
+      formatRatesForLog({ inputPerMillion: hostile as unknown as number, outputPerMillion: Symbol('x') as unknown as number }),
+    ).not.toThrow();
+  });
+
+  it('reads each rate once', () => {
+    let reads = 0;
+    const counted = {
+      get inputPerMillion(): number {
+        reads++;
+        return 3;
+      },
+      get outputPerMillion(): number {
+        reads++;
+        return 15;
+      },
+    };
+    expect(formatRatesForLog(counted)).toBe('$3/M in, $15/M out');
+    expect(reads).toBe(2);
+  });
+});
+
+describe('getRatesOrThrow — the table is a plain record and the model is a string (CGK-001, class 10)', () => {
+  const table: PricingTable = { 'toy-model-a': { inputPerMillion: 3, outputPerMillion: 15 } };
+
+  it.each([
+    ['a Map', new Map([['toy-model-a', rates]])],
+    ['a Set', new Set(['toy-model-a'])],
+    ['an array', [rates]],
+    ['null', null],
+    ['undefined', undefined],
+    ['a class instance', Object.assign(new UsageClass(), { 'toy-model-a': rates })],
+  ])('rejects %s as the table with a TypeError, not "(empty table)"', (_label, badTable) => {
+    expect(() => getRatesOrThrow(badTable as unknown as PricingTable, 'toy-model-a')).toThrow(TypeError);
+    expect(() => getRatesOrThrow(badTable as unknown as PricingTable, 'toy-model-a')).toThrow(/table must be an object/);
+  });
+
+  it.each([
+    ['a String object', new String('toy-model-a')],
+    ['an array holding the name', ['toy-model-a']],
+    ['an object whose toString returns the name', { toString: () => 'toy-model-a' }],
+    ['a number', 1],
+    ['a symbol', Symbol('toy-model-a')],
+    ['undefined', undefined],
+    ['null', null],
+  ])('rejects %s as the model instead of coercing it to a key', (_label, model) => {
+    expect(() => getRatesOrThrow(table, model as unknown as string)).toThrow(TypeError);
+    expect(() => getRatesOrThrow(table, model as unknown as string)).toThrow(/model must be a string/);
+  });
+
+  it('raises a TypeError, not the error a hostile toString throws', () => {
+    const hostile = {
+      toString(): string {
+        throw new RangeError('boom');
+      },
+    };
+    expect(() => getRatesOrThrow(table, hostile as unknown as string)).toThrow(TypeError);
+  });
+
+  it('escapes control and bidi characters from the model and the known-model list', () => {
+    const noisy: PricingTable = { 'line1\nline2\u001b[31m': rates };
+    let message = '';
+    try {
+      getRatesOrThrow(noisy, 'evil"\r\n\u202e\u2066model');
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/no pricing entry for model/);
+    expect(message).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+    expect(message).toContain('line1\\nline2');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mutation-driven additions: exact messages, the remaining overflow guard and
+// the model list separator.
+// ---------------------------------------------------------------------------
+
+const PLAIN_HINT = '(a plain object; not null, an array, a Map, a Date or a class instance)';
+
+describe('exact error messages', () => {
+  it('names the plain-object rule for rates, usage, the log helper and the table', () => {
+    expect(() => estimateCostUsd(new Map() as unknown as ModelRates, {})).toThrowError(
+      `estimateCostUsd: rates must be an object with inputPerMillion and outputPerMillion ${PLAIN_HINT}`,
+    );
+    expect(() => estimateCostUsd(rates, new Map() as unknown as UsageTokens)).toThrowError(
+      `estimateCostUsd: usage must be an object of token counts ${PLAIN_HINT}`,
+    );
+    expect(() => formatRatesForLog(new Map() as unknown as ModelRates)).toThrowError(
+      `formatRatesForLog: rates must be an object with inputPerMillion and outputPerMillion ${PLAIN_HINT}`,
+    );
+    expect(() => getRatesOrThrow(new Map() as unknown as PricingTable, 'm')).toThrowError(
+      `getRatesOrThrow: table must be an object keyed by model id ${PLAIN_HINT}`,
+    );
+  });
+
+  it('lists the accepted usage fields after an unknown key', () => {
+    expect(() => estimateCostUsd(rates, { input_tokens: 5 } as unknown as UsageTokens)).toThrowError(
+      'estimateCostUsd: usage has unknown field "input_tokens"; expected only ' +
+        'inputTokens, outputTokens, cacheReadTokens, cacheCreation5mTokens, cacheCreation1hTokens',
+    );
+  });
+
+  it('names the model, lists every known model with a comma and space, and explains why there is no default', () => {
+    const two: PricingTable = { 'model-a': rates, 'model-b': rates };
+    expect(() => getRatesOrThrow(two, 'model-c')).toThrowError(
+      'cost-governor-kit: no pricing entry for model "model-c". Known models: model-a, model-b. ' +
+        'Add it to your pricing table rather than falling back to a default — a wrong default price ' +
+        'defeats the point of a cost ceiling.',
+    );
+  });
+
+  it('prints a string rate quoted and a non-number by kind in formatRatesForLog', () => {
+    expect(formatRatesForLog({ inputPerMillion: '3' as unknown as number, outputPerMillion: null as unknown as number })).toBe(
+      '$"3"/M in, $null/M out',
+    );
+  });
+});
+
+describe('estimateCostUsd — finite-result guards', () => {
+  it('rejects a cost whose sum overflows', () => {
+    expect(() =>
+      estimateCostUsd(
+        { inputPerMillion: Number.MAX_VALUE, outputPerMillion: Number.MAX_VALUE },
+        { inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER },
+      ),
+    ).toThrowError('estimateCostUsd: calculated cost must remain finite');
+  });
+
+  it('rejects a cost that is finite but overflows when rounded to micro-dollars', () => {
+    expect(() => estimateCostUsd({ inputPerMillion: Number.MAX_VALUE, outputPerMillion: 0 }, { inputTokens: 1 })).toThrowError(
+      'estimateCostUsd: rounded cost must remain finite',
+    );
   });
 });

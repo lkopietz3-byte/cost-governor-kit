@@ -19,13 +19,21 @@
  * concurrent sessions, so this cannot exercise or disprove the "two
  * concurrent requests both pass Phase 1" behavior described in the SQL
  * file's own header — that requires a real multi-connection Postgres. It
- * also does not touch a live Supabase project's default role/privilege setup,
- * or the commented-out TypeScript adapter sketch at the end of the file.
+ * also does not touch a live Supabase project's default role/privilege setup.
+ *
+ * The last describe block extracts the commented-out TypeScript adapter at the
+ * end of the SQL file, strips its types with the TypeScript compiler, and runs
+ * that code against these same RPCs through a stub of the Supabase client's
+ * `rpc` method, inside the real `withReserveConfirm` (CGK-002). It does not
+ * run `@supabase/supabase-js`.
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { compileFunction } from 'node:vm';
 import { PGlite } from '@electric-sql/pglite';
+import ts from 'typescript';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { withReserveConfirm, type UsageLedger } from './reserveConfirm.js';
 
 const referenceSqlPath = fileURLToPath(
   new URL('../reference-impl/supabase-usage-ledger.sql', import.meta.url),
@@ -187,5 +195,162 @@ describe('reference-impl/supabase-usage-ledger.sql on PGlite — check/commit/li
   it('keeps independent keys independent', async () => {
     await commitUsage('key-a', 5, 'w1');
     await expect(checkUnderLimit('key-b', 5, 'w1')).resolves.toEqual({ allowed: true, current_count: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CGK-002: the example adapter at the end of the SQL file. Its commitUsage
+// must REJECT when usage was not recorded (committed: false, a missing or
+// malformed row, an RPC error) so that withReserveConfirm returns the paid
+// result WITH commitError set, instead of the caller seeing a recorded call.
+// ---------------------------------------------------------------------------
+
+type SupabaseAdapterFactory = (windowKey: string, limit: number) => UsageLedger;
+interface RpcResponse {
+  data: unknown;
+  error: unknown;
+}
+interface RpcClient {
+  rpc(fn: string, args: { p_key: string; p_limit: number; p_window: string }): Promise<RpcResponse>;
+}
+
+/** Pull the adapter out of the SQL file's comment block and turn it into a callable factory. */
+function loadCommentedAdapter(client: RpcClient): SupabaseAdapterFactory {
+  const lines = referenceSql.split('\n');
+  const start = lines.findIndex((line) => /^--\s+export function supabaseUsageLedger\b/.test(line));
+  expect(start).toBeGreaterThan(-1);
+  const body: string[] = [];
+  for (let i = start; i < lines.length; i++) {
+    const line = (lines[i] as string).replace(/^-- ?/, '');
+    body.push(line);
+    if (/^ {2}\}$/.test(line)) break; // the closing brace of the exported function
+  }
+  const source = body.join('\n').replace(/^\s*export /, '');
+  const js = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
+    reportDiagnostics: false,
+  }).outputText;
+  const build = compileFunction(`${js}\nreturn supabaseUsageLedger;`, ['supabase']) as (client: RpcClient) => SupabaseAdapterFactory;
+  return build(client);
+}
+
+/** A stub of the Supabase client's rpc(), answered by the real SQL functions on PGlite. */
+function pgliteRpc(database: PGlite): RpcClient {
+  return {
+    async rpc(fn, args) {
+      if (fn !== 'usage_ledger_check_under_limit' && fn !== 'usage_ledger_commit_usage') {
+        return { data: null, error: new Error(`unexpected rpc ${fn}`) };
+      }
+      try {
+        const result = await database.query(`select * from ${fn}($1, $2, $3)`, [args.p_key, args.p_limit, args.p_window]);
+        return { data: result.rows, error: null };
+      } catch (error) {
+        return { data: null, error };
+      }
+    },
+  };
+}
+
+/** A stub whose commit RPC answers exactly what the test says; check RPCs are answered as "allowed". */
+function scriptedCommit(response: RpcResponse): RpcClient {
+  return {
+    async rpc(fn) {
+      if (fn === 'usage_ledger_check_under_limit') return { data: [{ allowed: true, current_count: 0 }], error: null };
+      return response;
+    },
+  };
+}
+
+describe('supabaseUsageLedger example adapter (extracted from the SQL comment) — CGK-002', () => {
+  it('finds and loads the commented adapter', () => {
+    const adapter = loadCommentedAdapter(pgliteRpc(db))('w', 1);
+    expect(typeof adapter.checkUnderLimit).toBe('function');
+    expect(typeof adapter.commitUsage).toBe('function');
+  });
+
+  it('records usage on a real committed:true and returns the result with no commitError', async () => {
+    const ledger = loadCommentedAdapter(pgliteRpc(db))('adapter-w1', 2);
+    let paidCalls = 0;
+    const result = await withReserveConfirm(ledger, 'adapter-ok', 2, async () => {
+      paidCalls++;
+      return 'paid-result';
+    });
+    expect(result).toEqual({ allowed: true, result: 'paid-result' });
+    expect(Object.hasOwn(result, 'commitError')).toBe(false);
+    expect(paidCalls).toBe(1);
+    await expect(checkUnderLimit('adapter-ok', 2, 'adapter-w1')).resolves.toEqual({ allowed: true, current_count: 1 });
+  });
+
+  it('denies without calling the provider once the limit is reached', async () => {
+    const ledger = loadCommentedAdapter(pgliteRpc(db))('adapter-w2', 1);
+    await commitUsage('adapter-full', 1, 'adapter-w2');
+    let paidCalls = 0;
+    const result = await withReserveConfirm(ledger, 'adapter-full', 1, async () => {
+      paidCalls++;
+      return 'never';
+    });
+    expect(result).toEqual({ allowed: false });
+    expect(paidCalls).toBe(0);
+  });
+
+  it('rejects on a real committed:false, so the paid result comes back with commitError (no paid retry)', async () => {
+    const ledger = loadCommentedAdapter(pgliteRpc(db))('adapter-w3', 1);
+    let paidCalls = 0;
+    const result = await withReserveConfirm(ledger, 'adapter-raced', 1, async () => {
+      paidCalls++;
+      // Another request takes the last slot while this paid call is in flight.
+      await commitUsage('adapter-raced', 1, 'adapter-w3');
+      return 'paid-result';
+    });
+    expect(paidCalls).toBe(1);
+    expect(result).toMatchObject({ allowed: true, result: 'paid-result' });
+    expect(Object.hasOwn(result, 'commitError')).toBe(true);
+    const commitError = (result as { commitError?: unknown }).commitError;
+    expect(commitError).toBeInstanceOf(Error);
+    expect((commitError as Error).message).toMatch(/usage not recorded.*limit reached/);
+    expect((commitError as Error).message).not.toContain('adapter-raced'); // no key in the error text
+    // The other request's slot is the only one recorded: this call really was not counted.
+    await expect(checkUnderLimit('adapter-raced', 1, 'adapter-w3')).resolves.toEqual({ allowed: false, current_count: 1 });
+  });
+
+  it.each<[string, RpcResponse]>([
+    ['committed:false', { data: [{ committed: false, new_count: 3 }], error: null }],
+    ['a null data field', { data: null, error: null }],
+    ['an undefined data field', { data: undefined, error: null }],
+    ['an empty row list', { data: [], error: null }],
+    ['a row without committed', { data: [{ new_count: 1 }], error: null }],
+    ['a truthy non-boolean committed', { data: [{ committed: 'true' }], error: null }],
+    ['a numeric committed', { data: [{ committed: 1 }], error: null }],
+    ['a null row', { data: [null], error: null }],
+    ['an object instead of a row list', { data: { committed: true }, error: null }],
+  ])('rejects on %s and the paid result is still returned once', async (_label, response) => {
+    const ledger = loadCommentedAdapter(scriptedCommit(response))('w', 5);
+    let paidCalls = 0;
+    const result = await withReserveConfirm(ledger, 'user', 5, async () => {
+      paidCalls++;
+      return 'paid-result';
+    });
+    expect(paidCalls).toBe(1);
+    expect(result).toMatchObject({ allowed: true, result: 'paid-result' });
+    expect(Object.hasOwn(result, 'commitError')).toBe(true);
+    expect((result as { commitError?: unknown }).commitError).toBeInstanceOf(Error);
+  });
+
+  it('rethrows an RPC error unchanged, so commitError is the very error the client returned', async () => {
+    const rpcError = new Error('rpc unavailable');
+    const ledger = loadCommentedAdapter(scriptedCommit({ data: null, error: rpcError }))('w', 5);
+    const result = await withReserveConfirm(ledger, 'user', 5, async () => 'paid-result');
+    expect(result).toMatchObject({ allowed: true, result: 'paid-result' });
+    expect((result as { commitError?: unknown }).commitError).toBe(rpcError);
+  });
+
+  it('checkUnderLimit fails closed on a malformed response and propagates an RPC error', async () => {
+    const malformed = loadCommentedAdapter({ rpc: async () => ({ data: null, error: null }) })('w', 5);
+    await expect(malformed.checkUnderLimit('user', 5)).resolves.toBe(false);
+    const truthy = loadCommentedAdapter({ rpc: async () => ({ data: [{ allowed: 'yes' }], error: null }) })('w', 5);
+    await expect(truthy.checkUnderLimit('user', 5)).resolves.toBe(false);
+    const rpcError = new Error('down');
+    const failing = loadCommentedAdapter({ rpc: async () => ({ data: null, error: rpcError }) })('w', 5);
+    await expect(failing.checkUnderLimit('user', 5)).rejects.toBe(rpcError);
   });
 });

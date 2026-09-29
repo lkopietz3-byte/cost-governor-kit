@@ -30,9 +30,14 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --no-audit
 
-      - name: Check tag matches package.json version
-        if: github.event_name == 'push'
+      - name: Check this runs on a tag that matches package.json
+        # Applies to both triggers: a manual run must also be started from a
+        # v* tag, so only a deliberately tagged version can be published.
         run: |
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::Release must run on a v* tag, not ${GITHUB_REF_TYPE} ${GITHUB_REF_NAME}"
+            exit 1
+          fi
           PKG_VERSION="$(node -p "require('./package.json').version")"
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
@@ -40,19 +45,34 @@ jobs:
             exit 1
           fi
 
+      - name: Audit locked dependencies
+        run: npm run audit:dependencies
+
       - name: Verify
         run: npm run verify
+
+      - name: Check types (attw)
+        run: npm run attw
 
       - name: Check whether this version is already published
         id: check
         run: |
           PKG_NAME="$(node -p "require('./package.json').name")"
           PKG_VERSION="$(node -p "require('./package.json').version")"
-          if npm view "${PKG_NAME}@${PKG_VERSION}" version >/dev/null 2>&1; then
+          # Only a confirmed E404 means "not published yet". Any other registry
+          # error (outage, auth, network) fails the job instead of guessing.
+          set +e
+          OUTPUT="$(npm view "${PKG_NAME}@${PKG_VERSION}" version 2>&1)"
+          STATUS=$?
+          set -e
+          if [ "$STATUS" -eq 0 ] && [ -n "$OUTPUT" ]; then
             echo "already_published=true" >> "$GITHUB_OUTPUT"
             echo "${PKG_NAME}@${PKG_VERSION} is already on the registry; nothing to do."
-          else
+          elif echo "$OUTPUT" | grep -q "E404"; then
             echo "already_published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Could not determine registry state for ${PKG_NAME}@${PKG_VERSION}: ${OUTPUT}"
+            exit 1
           fi
 
       - name: Publish to npm

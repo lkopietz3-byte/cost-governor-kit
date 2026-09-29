@@ -196,8 +196,10 @@ grant execute on function usage_ledger_commit_usage(text, integer, text) to serv
 
 -- ---------------------------------------------------------------------------
 -- Example UsageLedger adapter (TypeScript) for these two RPCs via the
--- Supabase client. A sketch: it type-checks against this package's
--- UsageLedger types with a stubbed client, but was not run against Supabase.
+-- Supabase client. A sketch: src/referenceImplPglite.test.ts extracts this
+-- code, strips its types and runs it against the functions above through a
+-- stub of the client's rpc() method, inside withReserveConfirm. It was not
+-- run with @supabase/supabase-js or against a live Supabase project.
 --
 -- UsageLedger.commitUsage(key) receives no limit, so the adapter closes over
 -- the limit. Build one adapter per (window, limit) and pass the SAME limit to
@@ -226,11 +228,20 @@ grant execute on function usage_ledger_commit_usage(text, integer, text) to serv
 --           p_window: windowKey,
 --         });
 --         if (error) throw error;
---         if (data?.[0]?.committed !== true) {
---           // The paid call already happened but was not recorded (limit
---           // reached concurrently). Don't throw: withReserveConfirm would
---           // discard the successful result. Log it for reconciliation.
---           console.warn(`usage not recorded for ${key}: limit ${limit} reached concurrently`);
+--         const row: { committed?: unknown } | undefined = Array.isArray(data) ? data[0] : undefined;
+--         if (row?.committed !== true) {
+--           // Not recorded: the limit was reached concurrently (committed is
+--           // false), or the RPC answered with something unexpected. The paid
+--           // call already happened, so REJECT. withReserveConfirm catches the
+--           // rejection and returns the paid result with commitError set
+--           // instead of discarding it; check for it with
+--           // Object.hasOwn(result, 'commitError'), then reconcile. Do not
+--           // repeat the paid call. The message leaves the key out on purpose.
+--           throw new Error(
+--             row?.committed === false
+--               ? 'usage not recorded: limit reached concurrently'
+--               : 'usage not recorded: unexpected response from usage_ledger_commit_usage',
+--           );
 --         }
 --       },
 --     };
@@ -240,3 +251,6 @@ grant execute on function usage_ledger_commit_usage(text, integer, text) to serv
 --   const result = await withReserveConfirm(
 --     supabaseUsageLedger(today, limit), `${userId}:${today}`, limit, () => callYourLlmApi(prompt),
 --   );
+--   if (result.allowed && Object.hasOwn(result, 'commitError')) {
+--     // The paid result is in result.result; usage was NOT recorded.
+--   }
