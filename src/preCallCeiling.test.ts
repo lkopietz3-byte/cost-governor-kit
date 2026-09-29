@@ -567,6 +567,6 @@ describe('checkPreCallCeiling — error text cannot be broken by a hostile value
       message = (error as Error).message;
     }
     expect(message).toMatch(/ceilingUsd must be a non-negative finite number/);
-    expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+    expect(message).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
   });
 });

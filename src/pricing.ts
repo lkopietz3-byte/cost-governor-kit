@@ -29,6 +29,8 @@
  * different number.
  */
 
+import { describe, escapeText, isPlainRecord } from './internal.js';
+
 /**
  * List-price rates for one model, supplied by the caller. This library ships
  * no price table and no default rates.
@@ -36,6 +38,10 @@
  * Batch discounts, data-residency surcharges and fast-mode prices are not
  * modeled separately; fold them into these two numbers if they apply. The
  * cache multipliers are then applied to `inputPerMillion`.
+ *
+ * Pass a plain object or a null-prototype object. A `Map`, `Set`, `Date`,
+ * `RegExp`, array or class instance throws a `TypeError` wherever rates are
+ * read.
  */
 export interface ModelRates {
   /** USD per 1,000,000 uncached input tokens. Must be a finite number >= 0. */
@@ -61,7 +67,9 @@ export interface ModelRates {
  * A pricing table keyed by model id, for example
  * `{ "my-model": { inputPerMillion: 3, outputPerMillion: 15 } }` (illustrative
  * numbers). Build it however you like (config file, remote fetch). Look models
- * up with {@link getRatesOrThrow}, which only matches the table's own keys.
+ * up with {@link getRatesOrThrow}, which only matches the table's own keys. The
+ * table must be a plain or null-prototype object; a `Map` is rejected rather
+ * than read as an empty table.
  */
 export type PricingTable = Record<string, ModelRates>;
 
@@ -93,6 +101,10 @@ export const CACHE_CREATION_1H_MULTIPLIER = 2.0;
  * non-negative safe integer; `null`, fractions, negatives, NaN and Infinity
  * throw. Any other key throws too, so a provider payload passed as-is (for
  * example `{ input_tokens }`) is rejected instead of priced at $0.
+ *
+ * Pass a plain object or a null-prototype object. A `Map`, `Set`, `Date`,
+ * `RegExp`, array or class instance throws a `TypeError` instead of being
+ * priced as zero usage.
  *
  * Mapping from an Anthropic `usage` block: `input_tokens` -> `inputTokens`,
  * `output_tokens` -> `outputTokens`, `cache_read_input_tokens` ->
@@ -130,61 +142,78 @@ export interface UsageTokens {
  * is always the double nearest a whole number of micro-dollars, so it compares
  * equal to a decimal literal such as `0.0195`.
  *
+ * Each field of `rates` and `usage` is read exactly once, before anything is
+ * priced, and the cost is computed from those values, so a getter or proxy
+ * that answers differently the second time cannot change the result.
+ *
  * @param rates - Caller-supplied rates; there is no default. Both must be finite and >= 0.
  * @param usage - Token counts; see {@link UsageTokens}.
  * @returns Cost in USD, rounded to the nearest micro-dollar.
- * @throws TypeError if `rates` has a non-numeric field, `usage` is not a
- *   plain object (including `null`, an array, or a primitive), or `usage`
- *   has a field of the wrong type.
+ * @throws TypeError if `rates` or `usage` is not a plain or null-prototype
+ *   object (`null`, `undefined`, a primitive, an array, a `Map`, `Set`,
+ *   `Date`, `RegExp` or class instance), a rate is not a number, an unknown
+ *   usage key is present, or a token count is not a number.
  * @throws RangeError if a rate or token count is negative, non-finite (`NaN`
- *   or `Infinity`), not a safe integer (token counts only), or `usage` has a
- *   field outside the known set. Error messages name the field but never
- *   echo the rejected value.
+ *   or `Infinity`), or not a safe integer (token counts only). Error messages
+ *   name the field but never echo the rejected value; an unknown usage key is
+ *   echoed escaped.
  * @throws Error (not TypeError/RangeError) only for the internal "result
- *   must remain finite" safety net below — that guards the computed cost,
+ *   must remain finite" safety net below: that guards the computed cost,
  *   not a single bad input field.
  */
 export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
-  assertRate('inputPerMillion', rates?.inputPerMillion);
-  assertRate('outputPerMillion', rates?.outputPerMillion);
-  if (rates?.cacheReadPerMillion !== undefined) {
-    assertRate('cacheReadPerMillion', rates.cacheReadPerMillion);
+  if (!isPlainRecord(rates)) {
+    throw new TypeError(
+      'estimateCostUsd: rates must be an object with inputPerMillion and outputPerMillion ' +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
+    );
   }
-  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) {
-    throw new TypeError('estimateCostUsd: usage must be an object of token counts');
+  const inputPerMillion: unknown = rates.inputPerMillion;
+  assertRate('inputPerMillion', inputPerMillion);
+  const outputPerMillion: unknown = rates.outputPerMillion;
+  assertRate('outputPerMillion', outputPerMillion);
+  const cacheReadPerMillion: unknown = rates.cacheReadPerMillion;
+  if (cacheReadPerMillion !== undefined) {
+    assertRate('cacheReadPerMillion', cacheReadPerMillion);
+  }
+  if (!isPlainRecord(usage)) {
+    throw new TypeError(
+      'estimateCostUsd: usage must be an object of token counts ' +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
+    );
   }
   // An unrecognized key (a provider's snake_case field, a typo) would
   // otherwise be ignored and its tokens priced at $0.
   for (const key of Object.keys(usage)) {
     if (!USAGE_FIELDS.includes(key as keyof UsageTokens)) {
       throw new TypeError(
-        `estimateCostUsd: usage has unknown field ${JSON.stringify(key)}; ` +
+        `estimateCostUsd: usage has unknown field ${describe(key)}; ` +
           `expected only ${USAGE_FIELDS.join(', ')}`,
       );
     }
   }
 
-  const inputTokens = tokenCountOrZero(usage, 'inputTokens');
-  const outputTokens = tokenCountOrZero(usage, 'outputTokens');
-  const cacheReadTokens = tokenCountOrZero(usage, 'cacheReadTokens');
-  const cacheCreation5mTokens = tokenCountOrZero(usage, 'cacheCreation5mTokens');
-  const cacheCreation1hTokens = tokenCountOrZero(usage, 'cacheCreation1hTokens');
+  const inputTokens = tokenCountOrZero('inputTokens', usage.inputTokens);
+  const outputTokens = tokenCountOrZero('outputTokens', usage.outputTokens);
+  const cacheReadTokens = tokenCountOrZero('cacheReadTokens', usage.cacheReadTokens);
+  const cacheCreation5mTokens = tokenCountOrZero('cacheCreation5mTokens', usage.cacheCreation5mTokens);
+  const cacheCreation1hTokens = tokenCountOrZero('cacheCreation1hTokens', usage.cacheCreation1hTokens);
 
   // Preserve the original multiply-sum-divide order for the default path
   // (no override) exactly, so existing rounding results do not shift by a
   // floating-point ULP: only substitute a different expression when
   // cacheReadPerMillion is actually present.
   const cacheReadCostUsd =
-    rates.cacheReadPerMillion !== undefined
-      ? cacheReadTokens * rates.cacheReadPerMillion
-      : cacheReadTokens * rates.inputPerMillion * CACHE_READ_MULTIPLIER;
+    cacheReadPerMillion !== undefined
+      ? cacheReadTokens * cacheReadPerMillion
+      : cacheReadTokens * inputPerMillion * CACHE_READ_MULTIPLIER;
 
   const unscaledCostUsd =
-    inputTokens * rates.inputPerMillion +
+    inputTokens * inputPerMillion +
     cacheReadCostUsd +
-    cacheCreation5mTokens * rates.inputPerMillion * CACHE_CREATION_5M_MULTIPLIER +
-    cacheCreation1hTokens * rates.inputPerMillion * CACHE_CREATION_1H_MULTIPLIER +
-    outputTokens * rates.outputPerMillion;
+    cacheCreation5mTokens * inputPerMillion * CACHE_CREATION_5M_MULTIPLIER +
+    cacheCreation1hTokens * inputPerMillion * CACHE_CREATION_1H_MULTIPLIER +
+    outputTokens * outputPerMillion;
 
   if (!Number.isFinite(unscaledCostUsd)) {
     throw new Error('estimateCostUsd: calculated cost must remain finite');
@@ -206,7 +235,7 @@ const USAGE_FIELDS: ReadonlyArray<keyof UsageTokens> = [
   'cacheCreation1hTokens',
 ];
 
-function assertRate(field: keyof ModelRates, value: number): void {
+function assertRate(field: keyof ModelRates, value: unknown): asserts value is number {
   if (typeof value !== 'number') {
     throw new TypeError(`estimateCostUsd: rates.${field} must be a non-negative finite number`);
   }
@@ -215,8 +244,7 @@ function assertRate(field: keyof ModelRates, value: number): void {
   }
 }
 
-function tokenCountOrZero(usage: UsageTokens, field: keyof UsageTokens): number {
-  const value = usage[field];
+function tokenCountOrZero(field: keyof UsageTokens, value: unknown): number {
   if (value === undefined) {
     return 0;
   }
@@ -245,11 +273,28 @@ function roundToMicroDollar(usd: number): number {
  * every run so a stale or wrong rate is visible.
  *
  * Numbers are printed with JavaScript's default formatting and are not
- * validated or rounded: `NaN` prints as `$NaN/M`. Throws a TypeError if
- * `rates` is null or undefined.
+ * validated or rounded: `NaN` prints as `$NaN/M`. A value that is not a number
+ * is printed by kind (a string is quoted, with control, line-break and bidi
+ * characters escaped), never through its own `toString`, so a bad rate cannot
+ * forge a log line or send a terminal escape. Each rate is read once.
+ *
+ * @throws TypeError if `rates` is not a plain or null-prototype object
+ *   (`null`, `undefined`, an array, a `Map`, `Date`, class instance, ...).
  */
 export function formatRatesForLog(rates: ModelRates): string {
-  return `$${rates.inputPerMillion}/M in, $${rates.outputPerMillion}/M out`;
+  if (!isPlainRecord(rates)) {
+    throw new TypeError(
+      'formatRatesForLog: rates must be an object with inputPerMillion and outputPerMillion ' +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
+    );
+  }
+  const inputPerMillion: unknown = rates.inputPerMillion;
+  const outputPerMillion: unknown = rates.outputPerMillion;
+  return `$${renderRate(inputPerMillion)}/M in, $${renderRate(outputPerMillion)}/M out`;
+}
+
+function renderRate(value: unknown): string {
+  return typeof value === 'number' ? String(value) : describe(value);
 }
 
 /**
@@ -259,8 +304,14 @@ export function formatRatesForLog(rates: ModelRates): string {
  * Only the table's own keys match: inherited names such as `constructor`,
  * `toString` or `__proto__` throw like any unknown model. The returned
  * entry is the table's own object, not a copy, and is not validated here;
- * {@link estimateCostUsd} validates rates when it uses them.
+ * {@link estimateCostUsd} validates rates when it uses them. The model name
+ * and the known-model list in the error message are escaped, so a model name
+ * cannot forge a log line.
  *
+ * @throws TypeError if `table` is not a plain or null-prototype object (a
+ *   `Map` is rejected, not read as an empty table) or `model` is not a string
+ *   (a `String` object, an array or an object with a `toString` is never
+ *   coerced into a key).
  * @throws Error naming the model and listing the table's known models. Plain
  *   `Error`, not `TypeError`/`RangeError`: `model` isn't malformed input,
  *   it's a validly-shaped key that has no configured entry — the same
@@ -268,13 +319,22 @@ export function formatRatesForLog(rates: ModelRates): string {
  *   also leaves as a plain `Error`.
  */
 export function getRatesOrThrow(table: PricingTable, model: string): ModelRates {
+  if (!isPlainRecord(table)) {
+    throw new TypeError(
+      'getRatesOrThrow: table must be an object keyed by model id ' +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
+    );
+  }
+  if (typeof model !== 'string') {
+    throw new TypeError('getRatesOrThrow: model must be a string');
+  }
   // Own keys only: a plain-object table inherits `constructor`, `toString`,
   // `__proto__` and friends, which must never be returned as "rates".
   const rates = Object.hasOwn(table, model) ? table[model] : undefined;
   if (!rates) {
-    const known = Object.keys(table).join(', ') || '(empty table)';
+    const known = Object.keys(table).map(escapeText).join(', ') || '(empty table)';
     throw new Error(
-      `cost-governor-kit: no pricing entry for model "${model}". Known models: ${known}. ` +
+      `cost-governor-kit: no pricing entry for model "${escapeText(model)}". Known models: ${known}. ` +
         `Add it to your pricing table rather than falling back to a default — a wrong default price ` +
         `defeats the point of a cost ceiling.`,
     );

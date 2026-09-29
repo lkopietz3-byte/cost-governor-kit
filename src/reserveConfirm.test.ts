@@ -1025,7 +1025,7 @@ const visiblyBlank: ReadonlyArray<readonly [string, string]> = [
   ['whitespace mixed with invisibles', ' \t\u200B\u2066 \n'],
 ];
 
-const hostileText = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+const hostileText = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
 
 const okWork = async () => ({ status: 'succeeded' as const, value: 'paid' });
 

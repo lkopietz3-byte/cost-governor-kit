@@ -591,8 +591,8 @@ describe('estimateCostUsd — error text stays safe and never echoes a rejected 
       message = (error as Error).message;
     }
     expect(message).toMatch(/unknown field/);
-    expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
-    expect(message).toContain('\\u{1B}');
+    expect(message).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
+    expect(message).toContain('\\u{202E}');
   });
 });
 
@@ -614,7 +614,7 @@ describe('formatRatesForLog — plain records, one read, safe text', () => {
       inputPerMillion: '\u001b[2J\nFAKE' as unknown as number,
       outputPerMillion: '\u202egnp' as unknown as number,
     });
-    expect(line).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+    expect(line).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
     expect(line).toContain('in, ');
   });
 
@@ -692,7 +692,7 @@ describe('getRatesOrThrow — the table is a plain record and the model is a str
       message = (error as Error).message;
     }
     expect(message).toMatch(/no pricing entry for model/);
-    expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+    expect(message).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
     expect(message).toContain('line1\\nline2');
   });
 });

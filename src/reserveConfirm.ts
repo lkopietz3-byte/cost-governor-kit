@@ -42,6 +42,8 @@
  * advisory `UsageLedger` only; this kit ships no `CapacityReservationLedger`.
  */
 
+import { describe, isBlank, isPlainRecord } from './internal.js';
+
 /**
  * Storage contract for the advisory {@link withReserveConfirm} helper. `key`
  * is caller-defined: a user id, `${userId}:${date}` for a daily cap, or any
@@ -58,7 +60,10 @@ export interface UsageLedger {
   /**
    * Phase 2 — mutating. Increments usage under `key`. Call this
    * ONLY after the guarded call has succeeded — never speculatively, never
-   * before the call, and never if the call threw. Implementations should
+   * before the call, and never if the call threw. It must REJECT when usage
+   * was not recorded: {@link withReserveConfirm} ignores the resolved value,
+   * so resolving after a failed or refused write reads as "recorded".
+   * Implementations should
    * make this atomic with respect to their own writes, but this method does
    * not receive `limit` or a reservation. It cannot turn the preceding
    * read-only check into a strict concurrent ceiling. Use
@@ -88,7 +93,12 @@ export interface UsageLedger {
  *    usage count may be under-recorded for this call.
  *
  * Concurrent callers can all pass step 1 before any of them commits, so the
- * limit can be exceeded. It never retries anything.
+ * limit can be exceeded. It never retries anything. The value `commitUsage`
+ * resolves is ignored; only a rejection signals that usage was not recorded.
+ *
+ * Detect an unrecorded commit with `Object.hasOwn(result, 'commitError')`, not
+ * `if (result.commitError)`: a ledger may reject with `undefined`, `null`,
+ * `false`, `0` or `''`, and every one of those is falsy.
  *
  * @example
  *   const result = await withReserveConfirm(
@@ -152,7 +162,7 @@ export type ReserveConfirmResult<T> =
 
 /** One adapter-issued hold on capacity. Pass it back unchanged to the adapter. */
 export interface CapacityReservation {
-  /** Adapter-chosen id; must be a non-empty string. */
+  /** Adapter-chosen id; must be a non-blank string (not empty, not only whitespace or invisible characters). */
   id: string;
   /** Must equal the request's `key`. */
   key: string;
@@ -168,7 +178,11 @@ export interface CapacityReservation {
 
 /** Input to {@link withCapacityReservation} and `reserveCapacity`. */
 export interface ReserveCapacityRequest {
-  /** Non-empty (after trimming) string identifying what is limited. Not trimmed. */
+  /**
+   * Non-blank string identifying what is limited. Blank means empty or only
+   * whitespace and invisible (Default_Ignorable_Code_Point) characters. Not
+   * trimmed.
+   */
   key: string;
   /**
    * Maximum for confirmed usage plus unexpired holds under this key, enforced
@@ -176,7 +190,7 @@ export interface ReserveCapacityRequest {
    * which should deny.
    */
   limit: number;
-  /** Non-empty idempotency key for one logical operation. Reuse it on every retry; a new id is a new operation. */
+  /** Non-blank idempotency key for one logical operation (see `key` for "blank"). Reuse it on every retry; a new id is a new operation. */
   operationId: string;
 }
 
@@ -252,13 +266,22 @@ export type CapacityReservationResult<T> =
  * Reserve capacity before one upstream operation, then confirm or release it.
  *
  * What this helper guarantees (given any adapter):
- * - It validates `request` first and throws, without calling the adapter,
- *   for a limit that is not a safe integer >= 0 or an empty key/operationId.
+ * - It reads `request` once (its `limit`, `key` and `operationId`), validates
+ *   that snapshot and throws, without calling the adapter, for a `request`
+ *   that is not a plain or null-prototype object, a limit that is not a safe
+ *   integer >= 0, or a blank key/operationId (empty, or only whitespace and
+ *   invisible characters). The adapter receives a fresh
+ *   `{ key, limit, operationId }` copy, and every later comparison uses the
+ *   validated values, so neither the caller changing its object nor the
+ *   adapter editing its argument can change what a reservation is checked
+ *   against.
  * - It calls `reserveCapacity` exactly once and `doTheWork` at most once,
- *   only for an `acquired` decision whose reservation has a non-empty id,
+ *   only for an `acquired` decision whose reservation has a non-blank id,
  *   the request's key and operationId, and an `expiresAt` later than
  *   `Date.now()`. A malformed or unknown decision throws before any work;
  *   if the adapter did create a hold, it is left in place (not released).
+ * - Each field of the decision, the reservation and the work outcome is read
+ *   once.
  * - `{ status: 'succeeded' }` leads to one `confirmReservation` call;
  *   `{ status: 'failed' }` to one `releaseReservation` call. It never calls
  *   both, never calls either twice, and never retries.
@@ -277,43 +300,59 @@ export type CapacityReservationResult<T> =
  * `operation_in_progress`. Once it expires it stops counting (per the
  * contract), so paid work that was never confirmed can then push real usage
  * past the limit until reconciliation confirms it.
+ *
+ * @throws TypeError when `request` is not a plain object, `key` or
+ *   `operationId` is not a string, `limit` is not a number, or the adapter
+ *   returns a decision or reservation of the wrong shape.
+ * @throws RangeError for a `limit` that is not a safe integer >= 0, a blank
+ *   key, operationId or reservation id, a reservation for a different key or
+ *   operationId, an unparseable or already-expired `expiresAt`, a terminal
+ *   decision for a different operation, or an unknown decision status.
  */
 export async function withCapacityReservation<T>(
   ledger: CapacityReservationLedger,
   request: ReserveCapacityRequest,
   doTheWork: (reservation: CapacityReservation) => Promise<CapacityWorkOutcome<T>>,
 ): Promise<CapacityReservationResult<T>> {
-  validateReserveCapacityRequest(request);
-  const decision = await ledger.reserveCapacity(request);
-  if (!decision || typeof decision !== "object" || !("status" in decision)) {
+  const { key, limit, operationId } = readReserveCapacityRequest(request);
+  const decision: unknown = await ledger.reserveCapacity({ key, limit, operationId });
+  if (!decision || typeof decision !== 'object' || !('status' in decision)) {
     throw new TypeError("withCapacityReservation: adapter returned an invalid reservation decision");
   }
-  const decisionStatus: unknown = (decision as { status?: unknown }).status;
-  if (decision.status === "denied") return { status: "denied", reason: decision.reason };
-  if (decision.status === "operation_in_progress") {
-    validateReservationIdentity(decision.reservation, request, false);
-    return { status: "operation_in_progress", reservation: decision.reservation };
+  const decisionRecord = decision as { status?: unknown; reason?: unknown; reservation?: unknown; operationId?: unknown };
+  const status: unknown = decisionRecord.status;
+  if (status === "denied") {
+    const reason = decisionRecord.reason as string | undefined;
+    return { status: "denied", reason };
   }
-  if (decision.status === "operation_terminal") {
-    if (decision.operationId !== request.operationId) {
+  if (status === "operation_in_progress") {
+    const reservation = decisionRecord.reservation as CapacityReservation;
+    validateReservationIdentity(reservation, key, operationId, false);
+    return { status: "operation_in_progress", reservation };
+  }
+  if (status === "operation_terminal") {
+    const terminalOperationId = decisionRecord.operationId as string;
+    const reason = decisionRecord.reason as string | undefined;
+    if (terminalOperationId !== operationId) {
       throw new RangeError("withCapacityReservation: adapter terminal decision operationId does not match request");
     }
-    return { status: "operation_terminal", operationId: decision.operationId, reason: decision.reason };
+    return { status: "operation_terminal", operationId: terminalOperationId, reason };
   }
-  if (decisionStatus !== "acquired") {
-    throw new RangeError(`withCapacityReservation: adapter returned unknown reservation decision status ${String(decisionStatus)}`);
+  if (status !== "acquired") {
+    throw new RangeError(`withCapacityReservation: adapter returned unknown reservation decision status ${describe(status)}`);
   }
 
-  const { reservation } = decision;
-  validateReservationIdentity(reservation, request);
-  let outcome: CapacityWorkOutcome<T>;
+  const reservation = decisionRecord.reservation as CapacityReservation;
+  validateReservationIdentity(reservation, key, operationId);
+  let outcome: unknown;
   try {
     outcome = await doTheWork(reservation);
   } catch (error) {
     return { status: "work_outcome_ambiguous", reservation, error };
   }
 
-  if (!isCapacityWorkOutcome(outcome)) {
+  const parsed = readCapacityWorkOutcome<T>(outcome);
+  if (!parsed) {
     return {
       status: "work_outcome_ambiguous",
       reservation,
@@ -321,79 +360,104 @@ export async function withCapacityReservation<T>(
     };
   }
 
-  if (outcome.status === "failed") {
+  if (parsed.status === "failed") {
     try {
       await ledger.releaseReservation(reservation);
-      return { status: "released_after_failure", reservation, error: outcome.error };
+      return { status: "released_after_failure", reservation, error: parsed.error };
     } catch (releaseError) {
-      return { status: "release_failed", reservation, workError: outcome.error, releaseError };
+      return { status: "release_failed", reservation, workError: parsed.error, releaseError };
     }
   }
 
   try {
     await ledger.confirmReservation(reservation);
-    return { status: "confirmed", reservation, value: outcome.value };
+    return { status: "confirmed", reservation, value: parsed.value };
   } catch (error) {
-    return { status: "confirmation_failed", reservation, value: outcome.value, error };
+    return { status: "confirmation_failed", reservation, value: parsed.value, error };
   }
 }
 
-function validateReserveCapacityRequest(request: ReserveCapacityRequest): void {
-  if (typeof request.limit !== "number") {
+/** Read the request once and validate what was read. Returns plain copies of the three fields. */
+function readReserveCapacityRequest(request: ReserveCapacityRequest): ReserveCapacityRequest {
+  if (!isPlainRecord(request)) {
+    throw new TypeError(
+      "withCapacityReservation: request must be an object with key, limit and operationId " +
+        "(a plain object; not null, an array, a Map, a Date or a class instance)",
+    );
+  }
+  const limit: unknown = request.limit;
+  const key: unknown = request.key;
+  const operationId: unknown = request.operationId;
+  if (typeof limit !== "number") {
     throw new TypeError("withCapacityReservation: limit must be a non-negative safe integer");
   }
-  if (!Number.isSafeInteger(request.limit) || request.limit < 0) {
+  if (!Number.isSafeInteger(limit) || limit < 0) {
     throw new RangeError("withCapacityReservation: limit must be a non-negative safe integer");
   }
-  if (typeof request.key !== "string") {
+  if (typeof key !== "string") {
     throw new TypeError("withCapacityReservation: key must be a non-empty string");
   }
-  if (!request.key.trim()) {
+  if (isBlank(key)) {
     throw new RangeError("withCapacityReservation: key must be a non-empty string");
   }
-  if (typeof request.operationId !== "string") {
+  if (typeof operationId !== "string") {
     throw new TypeError("withCapacityReservation: operationId must be a non-empty string");
   }
-  if (!request.operationId.trim()) {
+  if (isBlank(operationId)) {
     throw new RangeError("withCapacityReservation: operationId must be a non-empty string");
   }
+  return { key, limit, operationId };
 }
 
 function validateReservationIdentity(
   reservation: CapacityReservation,
-  request: ReserveCapacityRequest,
+  requestKey: string,
+  requestOperationId: string,
   requireUnexpired = true,
 ): void {
   if (!reservation || typeof reservation !== "object") {
     throw new TypeError("withCapacityReservation: adapter returned an invalid reservation");
   }
-  if (typeof reservation.id !== "string") {
+  const id: unknown = reservation.id;
+  const key: unknown = reservation.key;
+  const operationId: unknown = reservation.operationId;
+  const expiresAt: unknown = reservation.expiresAt;
+  if (typeof id !== "string") {
     throw new TypeError("withCapacityReservation: reservation id must be a non-empty string");
   }
-  if (!reservation.id.trim()) {
+  if (isBlank(id)) {
     throw new RangeError("withCapacityReservation: reservation id must be a non-empty string");
   }
-  if (reservation.key !== request.key) {
+  if (key !== requestKey) {
     throw new RangeError("withCapacityReservation: reservation key does not match request");
   }
-  if (reservation.operationId !== request.operationId) {
+  if (operationId !== requestOperationId) {
     throw new RangeError("withCapacityReservation: reservation operationId does not match request");
   }
-  if (typeof reservation.expiresAt !== "string") {
+  if (typeof expiresAt !== "string") {
     throw new TypeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
   }
-  if (!Number.isFinite(Date.parse(reservation.expiresAt))) {
+  const expiresAtMs = Date.parse(expiresAt);
+  if (!Number.isFinite(expiresAtMs)) {
     throw new RangeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
   }
-  if (requireUnexpired && Date.parse(reservation.expiresAt) <= Date.now()) {
+  if (requireUnexpired && expiresAtMs <= Date.now()) {
     throw new RangeError("withCapacityReservation: adapter returned an expired reservation");
   }
 }
 
-function isCapacityWorkOutcome(value: unknown): value is CapacityWorkOutcome<unknown> {
-  if (!value || typeof value !== "object") return false;
+/** Read a work outcome once. Returns `undefined` for anything that is not a well-formed outcome. */
+function readCapacityWorkOutcome<T>(
+  value: unknown,
+): { status: "succeeded"; value: T } | { status: "failed"; error: unknown } | undefined {
+  if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
-  if (record.status === "succeeded") return Object.prototype.hasOwnProperty.call(record, "value");
-  if (record.status === "failed") return Object.prototype.hasOwnProperty.call(record, "error");
-  return false;
+  const status: unknown = record.status;
+  if (status === "succeeded") {
+    return Object.prototype.hasOwnProperty.call(record, "value") ? { status, value: record.value as T } : undefined;
+  }
+  if (status === "failed") {
+    return Object.prototype.hasOwnProperty.call(record, "error") ? { status, error: record.error } : undefined;
+  }
+  return undefined;
 }

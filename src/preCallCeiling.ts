@@ -27,9 +27,15 @@
  * has no default anywhere in this library. Log it with `formatRatesForLog()`.
  */
 
+import { describe, isPlainRecord } from './internal.js';
 import { estimateCostUsd, type ModelRates, type UsageTokens } from './pricing.js';
 
-/** Input to {@link checkPreCallCeiling}. */
+/**
+ * Input to {@link checkPreCallCeiling}. The check itself, `rates` and
+ * `estimatedNextCallUsage` must each be a plain or null-prototype object; a
+ * `Map`, `Set`, `Date`, `RegExp`, array or class instance throws a
+ * `TypeError` before any decision.
+ */
 export interface PreCallCeilingCheck {
   /** Cumulative spend already incurred this run/session/day, in USD. Finite and >= 0. */
   spentSoFarUsd: number;
@@ -94,73 +100,93 @@ export interface PreCallCeilingResult {
  * // ...only now make the call, then add its real cost to runningTotal.
  * ```
  *
- * @throws TypeError when `check`/`rates` is missing or `rates.inputPerMillion`/
- *   `outputPerMillion` is not a number, or `ceilingUsd`/`spentSoFarUsd` is not
- *   a number.
+ * Each field of `check`, `check.rates` and the usage estimate is read exactly
+ * once, and validation and the decision use those values, so a getter or
+ * proxy that answers differently the second time cannot change the outcome.
+ *
+ * @throws TypeError when `check` or `rates` is not a plain or null-prototype
+ *   object, `rates.inputPerMillion`/`outputPerMillion` is not a number,
+ *   `ceilingUsd`/`spentSoFarUsd` is not a number, or the usage estimate is
+ *   not a plain object of token counts (a `Map`, `Set`, `Date`, `RegExp`,
+ *   array or class instance is rejected, never priced as zero).
  * @throws RangeError when a present, correctly-typed `rates` field,
  *   `ceilingUsd`, or `spentSoFarUsd` is negative or non-finite (these
  *   messages include the rejected value), the usage estimate is invalid
  *   (see {@link estimateCostUsd}), or the projected total is not finite.
  */
 export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingResult {
-  if (
-    !check.rates ||
-    typeof check.rates.inputPerMillion !== 'number' ||
-    typeof check.rates.outputPerMillion !== 'number'
-  ) {
+  if (!isPlainRecord(check)) {
     throw new TypeError(
-      'checkPreCallCeiling: `rates` (with non-negative finite numeric inputPerMillion/outputPerMillion) is required. ' +
-        'This library never defaults or hardcodes a price — pass the live rate explicitly, ' +
-        'the same way classify-batch.mjs takes --input-rate/--output-rate as CLI arguments, ' +
-        'so a stale price cannot silently corrupt the spend cap.',
+      'checkPreCallCeiling: check must be an object with spentSoFarUsd, ceilingUsd, estimatedNextCallUsage and rates ' +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
     );
+  }
+  const rates: unknown = check.rates;
+  const ceilingUsd: unknown = check.ceilingUsd;
+  const spentSoFarUsd: unknown = check.spentSoFarUsd;
+  const estimatedNextCallUsage: unknown = check.estimatedNextCallUsage;
+
+  if (!isPlainRecord(rates)) {
+    throw new TypeError(RATES_REQUIRED_MESSAGE);
+  }
+  const inputPerMillion: unknown = rates.inputPerMillion;
+  const outputPerMillion: unknown = rates.outputPerMillion;
+  const cacheReadPerMillion: unknown = rates.cacheReadPerMillion;
+  if (typeof inputPerMillion !== 'number' || typeof outputPerMillion !== 'number') {
+    throw new TypeError(RATES_REQUIRED_MESSAGE);
   }
   if (
-    !Number.isFinite(check.rates.inputPerMillion) ||
-    !Number.isFinite(check.rates.outputPerMillion) ||
-    check.rates.inputPerMillion < 0 ||
-    check.rates.outputPerMillion < 0
+    !Number.isFinite(inputPerMillion) ||
+    !Number.isFinite(outputPerMillion) ||
+    inputPerMillion < 0 ||
+    outputPerMillion < 0
   ) {
-    throw new RangeError(
-      'checkPreCallCeiling: `rates` (with non-negative finite numeric inputPerMillion/outputPerMillion) is required. ' +
-        'This library never defaults or hardcodes a price — pass the live rate explicitly, ' +
-        'the same way classify-batch.mjs takes --input-rate/--output-rate as CLI arguments, ' +
-        'so a stale price cannot silently corrupt the spend cap.',
-    );
+    throw new RangeError(RATES_REQUIRED_MESSAGE);
   }
-  if (typeof check.ceilingUsd !== 'number') {
-    throw new TypeError(`checkPreCallCeiling: ceilingUsd must be a non-negative finite number, got ${String(check.ceilingUsd)}`);
+  if (typeof ceilingUsd !== 'number') {
+    throw new TypeError(`checkPreCallCeiling: ceilingUsd must be a non-negative finite number, got ${describe(ceilingUsd)}`);
   }
-  if (!Number.isFinite(check.ceilingUsd) || check.ceilingUsd < 0) {
-    throw new RangeError(`checkPreCallCeiling: ceilingUsd must be a non-negative finite number, got ${check.ceilingUsd}`);
+  if (!Number.isFinite(ceilingUsd) || ceilingUsd < 0) {
+    throw new RangeError(`checkPreCallCeiling: ceilingUsd must be a non-negative finite number, got ${ceilingUsd}`);
   }
-  if (typeof check.spentSoFarUsd !== 'number') {
-    throw new TypeError(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${String(check.spentSoFarUsd)}`);
+  if (typeof spentSoFarUsd !== 'number') {
+    throw new TypeError(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${describe(spentSoFarUsd)}`);
   }
-  if (!Number.isFinite(check.spentSoFarUsd) || check.spentSoFarUsd < 0) {
-    throw new RangeError(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${check.spentSoFarUsd}`);
+  if (!Number.isFinite(spentSoFarUsd) || spentSoFarUsd < 0) {
+    throw new RangeError(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${spentSoFarUsd}`);
   }
 
-  const projectedNextCallCostUsd = estimateCostUsd(check.rates, check.estimatedNextCallUsage);
-  const unroundedProjectedTotalUsd = check.spentSoFarUsd + projectedNextCallCostUsd;
+  // estimateCostUsd validates the optional cacheReadPerMillion and the usage
+  // estimate, from this copy of the rates (never the caller's object again).
+  const projectedNextCallCostUsd = estimateCostUsd(
+    { inputPerMillion, outputPerMillion, cacheReadPerMillion } as ModelRates,
+    estimatedNextCallUsage as UsageTokens,
+  );
+  const unroundedProjectedTotalUsd = spentSoFarUsd + projectedNextCallCostUsd;
   if (!Number.isFinite(unroundedProjectedTotalUsd)) {
     throw new Error('checkPreCallCeiling: projected total must remain finite');
   }
   const projectedTotalUsd = round6(unroundedProjectedTotalUsd);
-  const allowed = projectedTotalUsd <= check.ceilingUsd;
+  const allowed = projectedTotalUsd <= ceilingUsd;
 
   return {
     allowed,
     projectedNextCallCostUsd,
     projectedTotalUsd,
-    ceilingUsd: check.ceilingUsd,
+    ceilingUsd,
     reason: allowed
       ? undefined
       : `Projected total spend $${projectedTotalUsd.toFixed(6)} ` +
-        `(already spent $${check.spentSoFarUsd.toFixed(6)} + projected next call $${projectedNextCallCostUsd.toFixed(6)}) ` +
-        `would exceed the ceiling of $${check.ceilingUsd.toFixed(6)}. Refusing to make the call.`,
+        `(already spent $${spentSoFarUsd.toFixed(6)} + projected next call $${projectedNextCallCostUsd.toFixed(6)}) ` +
+        `would exceed the ceiling of $${ceilingUsd.toFixed(6)}. Refusing to make the call.`,
   };
 }
+
+const RATES_REQUIRED_MESSAGE =
+  'checkPreCallCeiling: `rates` (a plain object with non-negative finite numeric inputPerMillion/outputPerMillion) is required. ' +
+  'This library never defaults or hardcodes a price — pass the live rate explicitly, ' +
+  'the same way classify-batch.mjs takes --input-rate/--output-rate as CLI arguments, ' +
+  'so a stale price cannot silently corrupt the spend cap.';
 
 function round6(n: number): number {
   const rounded = Math.round(n * 1e6) / 1e6;
