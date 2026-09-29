@@ -38,6 +38,19 @@ assert.throws(
 assert.throws(() => estimateCostUsd(rates, { inputTokens: -1 }), /inputTokens/);
 assert.throws(() => estimateCostUsd(rates, { input_tokens: 1_000 }), /unknown field "input_tokens"/);
 assert.equal(formatRatesForLog(rates), '$3/M in, $15/M out');
+// Records must be plain: a Map, Set, Date, RegExp or class instance is a TypeError,
+// never priced as zero usage or read as an empty table.
+for (const usage of [new Map([['inputTokens', 1_000_000]]), new Set(), new Date(0), /x/, new (class Usage { inputTokens = 1_000_000 })()]) {
+  assert.throws(() => estimateCostUsd(rates, usage), TypeError);
+  assert.throws(
+    () => checkPreCallCeiling({ rates, spentSoFarUsd: 0, ceilingUsd: 0, estimatedNextCallUsage: usage }),
+    TypeError,
+  );
+}
+assert.equal(estimateCostUsd(rates, Object.assign(Object.create(null), { inputTokens: 1_000_000 })), 3);
+assert.throws(() => estimateCostUsd(new Map(), {}), TypeError);
+assert.throws(() => getRatesOrThrow(new Map([['toy-model', rates]]), 'toy-model'), TypeError);
+assert.throws(() => getRatesOrThrow({ 'toy-model': rates }, ['toy-model']), TypeError);
 assert.deepEqual(getRatesOrThrow({ 'toy-model': rates }, 'toy-model'), rates);
 assert.throws(() => getRatesOrThrow({ 'toy-model': rates }, 'constructor'), /no pricing entry/);
 
@@ -90,6 +103,15 @@ await assert.rejects(
   withCapacityReservation({}, { key: 'k', limit: Number.NaN, operationId: 'op' }, async () => ({ status: 'succeeded', value: 1 })),
   /limit must be a non-negative safe integer/,
 );
+// A key that shows nothing (zero-width space, bidi isolates) is blank, and no adapter is called.
+await assert.rejects(
+  withCapacityReservation({}, { key: '\u200B\u2066', limit: 1, operationId: 'op' }, async () => ({ status: 'succeeded', value: 1 })),
+  RangeError,
+);
+await assert.rejects(
+  withCapacityReservation({}, new Map(), async () => ({ status: 'succeeded', value: 1 })),
+  TypeError,
+);
 
 // Advisory helper: commits only after success; a throw is never committed.
 const counts = new Map();
@@ -116,5 +138,15 @@ assert.deepEqual(
   await withReserveConfirm(flakyLedger, 'k', 1, async () => 'paid'),
   { allowed: true, result: 'paid', commitError: commitFailure },
 );
+// A ledger may reject with any value, including a falsy one: detect the failure by
+// presence (Object.hasOwn), not truthiness.
+for (const rejection of [undefined, null, false, 0, '']) {
+  const falsyLedger = { checkUnderLimit: async () => true, commitUsage: () => Promise.reject(rejection) };
+  const outcome = await withReserveConfirm(falsyLedger, 'k', 1, async () => 'paid');
+  assert.equal(outcome.result, 'paid');
+  assert.equal(Object.hasOwn(outcome, 'commitError'), true);
+  assert.equal(outcome.commitError, rejection);
+}
+assert.equal(Object.hasOwn(await withReserveConfirm(ledger, 'fresh', 1, async () => 'ok'), 'commitError'), false);
 
 console.log('consumer-probe: ok');

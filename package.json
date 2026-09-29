@@ -1,6 +1,6 @@
 {
   "name": "cost-governor-kit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates, and reserve/confirm usage-counting helpers whose limits are enforced by your own storage adapter.",
   "keywords": [
     "llm",
@@ -51,6 +51,19 @@
       "default": "./dist/reserveConfirm.js"
     }
   },
+  "typesVersions": {
+    "*": {
+      "pricing": [
+        "./dist/pricing.d.ts"
+      ],
+      "preCallCeiling": [
+        "./dist/preCallCeiling.d.ts"
+      ],
+      "reserveConfirm": [
+        "./dist/reserveConfirm.d.ts"
+      ]
+    }
+  },
   "sideEffects": false,
   "files": [
     "dist",
@@ -69,7 +82,7 @@
     "typecheck": "tsc --noEmit",
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "verify:package": "node scripts/verify-package.mjs",
-    "attw": "attw --pack . --ignore-rules cjs-resolves-to-esm --profile node16",
+    "attw": "attw --pack . --ignore-rules cjs-resolves-to-esm",
     "lint": "eslint . --max-warnings=0",
     "audit:dependencies": "npm audit --package-lock-only --include=dev --ignore-scripts --audit-level=low",
     "prepare": "npm run build",

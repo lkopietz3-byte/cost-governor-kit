@@ -99,9 +99,10 @@ async function advisory(): Promise<number | undefined> {
   const outcome: ReserveConfirmResult<number> = await withReserveConfirm(usageLedger, 'consumer', 1, async () => 7);
   if (outcome.allowed) {
     // commitError is optional and typed unknown: present only when the
-    // commit failed after a successful call, per the TSDoc contract.
+    // commit failed after a successful call, per the TSDoc contract. Test for
+    // presence, not truthiness: a ledger may reject with a falsy value.
     const commitError: unknown = outcome.commitError;
-    if (commitError !== undefined) return outcome.result;
+    if (Object.hasOwn(outcome, 'commitError')) void commitError;
   }
   return outcome.allowed ? outcome.result : outcome.result;
 }

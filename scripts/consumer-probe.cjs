@@ -19,6 +19,7 @@ const rates = { inputPerMillion: 3, outputPerMillion: 15 };
 assert.equal(root.estimateCostUsd(rates, { inputTokens: 1_000_000 }), 3);
 assert.throws(() => root.estimateCostUsd(rates, { inputTokens: -1 }), RangeError, 'a negative token count should still throw a RangeError via require()');
 assert.throws(() => root.estimateCostUsd(rates, null), TypeError, 'a non-object usage should still throw a TypeError via require()');
+assert.throws(() => root.estimateCostUsd(rates, new Map([['inputTokens', 1_000_000]])), TypeError, 'a Map is not a plain usage record via require()');
 
 const denied = root.checkPreCallCeiling({
   rates,
