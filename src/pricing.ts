@@ -215,10 +215,8 @@ export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
     cacheCreation1hTokens * inputPerMillion * CACHE_CREATION_1H_MULTIPLIER +
     outputTokens * outputPerMillion;
 
-  if (!Number.isFinite(unscaledCostUsd)) {
-    throw new Error('estimateCostUsd: calculated cost must remain finite');
-  }
-
+  // An overflowed sum is Infinity, and Infinity / 1e6 is still Infinity, so
+  // this one check also covers the sum.
   const costUsd = unscaledCostUsd / 1_000_000;
   if (!Number.isFinite(costUsd)) {
     throw new Error('estimateCostUsd: calculated cost must remain finite');
@@ -290,11 +288,8 @@ export function formatRatesForLog(rates: ModelRates): string {
   }
   const inputPerMillion: unknown = rates.inputPerMillion;
   const outputPerMillion: unknown = rates.outputPerMillion;
-  return `$${renderRate(inputPerMillion)}/M in, $${renderRate(outputPerMillion)}/M out`;
-}
-
-function renderRate(value: unknown): string {
-  return typeof value === 'number' ? String(value) : describe(value);
+  // describe() prints a number exactly as String() does and anything else by kind.
+  return `$${describe(inputPerMillion)}/M in, $${describe(outputPerMillion)}/M out`;
 }
 
 /**

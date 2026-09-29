@@ -570,3 +570,88 @@ describe('checkPreCallCeiling — error text cannot be broken by a hostile value
     expect(message).not.toMatch(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Mutation-driven additions: rate range checks run before ceiling and spend
+// checks, zero is a valid rate, and both overflow guards fire.
+// ---------------------------------------------------------------------------
+
+const RATES_MESSAGE = /`rates` \(a plain object with non-negative finite numeric inputPerMillion\/outputPerMillion\) is required\. This library never defaults or hardcodes a price — pass the live rate explicitly, the same way classify-batch\.mjs takes --input-rate\/--output-rate as CLI arguments, so a stale price cannot silently corrupt the spend cap\./;
+
+describe('checkPreCallCeiling — the rates range check comes first and names rates', () => {
+  it.each([
+    ['NaN inputPerMillion', { inputPerMillion: Number.NaN, outputPerMillion: 15 }],
+    ['NaN outputPerMillion', { inputPerMillion: 3, outputPerMillion: Number.NaN }],
+    ['Infinity inputPerMillion', { inputPerMillion: Number.POSITIVE_INFINITY, outputPerMillion: 15 }],
+    ['Infinity outputPerMillion', { inputPerMillion: 3, outputPerMillion: Number.POSITIVE_INFINITY }],
+    ['negative inputPerMillion', { inputPerMillion: -1, outputPerMillion: 15 }],
+    ['negative outputPerMillion', { inputPerMillion: 3, outputPerMillion: -1 }],
+    ['-Infinity inputPerMillion', { inputPerMillion: Number.NEGATIVE_INFINITY, outputPerMillion: 15 }],
+    ['-Infinity outputPerMillion', { inputPerMillion: 3, outputPerMillion: Number.NEGATIVE_INFINITY }],
+  ])('raises the rates RangeError for %s even when the ceiling and spend are also invalid', (_label, badRates) => {
+    const check = () =>
+      checkPreCallCeiling({ spentSoFarUsd: -1, ceilingUsd: -1, estimatedNextCallUsage: { inputTokens: -1 }, rates: badRates });
+    expect(check).toThrow(RangeError);
+    expect(check).toThrow(RATES_MESSAGE);
+  });
+
+  it('raises the rates TypeError for a missing or non-numeric rate even when the ceiling is invalid', () => {
+    const check = (badRates: unknown) => () =>
+      checkPreCallCeiling({ spentSoFarUsd: 0, ceilingUsd: -1, estimatedNextCallUsage: {}, rates: badRates as ModelRates });
+    expect(check({ outputPerMillion: 15 })).toThrow(TypeError);
+    expect(check({ outputPerMillion: 15 })).toThrow(RATES_MESSAGE);
+    expect(check({ inputPerMillion: 3 })).toThrow(RATES_MESSAGE);
+    expect(check({ inputPerMillion: '3', outputPerMillion: 15 })).toThrow(RATES_MESSAGE);
+    expect(check({ inputPerMillion: '3', outputPerMillion: 15 })).toThrow(TypeError);
+    expect(check({ inputPerMillion: 3, outputPerMillion: '15' })).toThrow(TypeError);
+  });
+
+  it('accepts zero for either rate and prices the call at zero', () => {
+    const result = checkPreCallCeiling({
+      spentSoFarUsd: 0,
+      ceilingUsd: 0,
+      estimatedNextCallUsage: { inputTokens: 1_000_000, outputTokens: 1_000_000 },
+      rates: { inputPerMillion: 0, outputPerMillion: 0 },
+    });
+    expect(result).toMatchObject({ allowed: true, projectedNextCallCostUsd: 0, projectedTotalUsd: 0 });
+  });
+
+  it('accepts a zero output rate and a zero input rate independently', () => {
+    expect(
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 1,
+        estimatedNextCallUsage: { inputTokens: 1_000_000 },
+        rates: { inputPerMillion: 1, outputPerMillion: 0 },
+      }).projectedTotalUsd,
+    ).toBe(1);
+    expect(
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 1,
+        estimatedNextCallUsage: { outputTokens: 1_000_000 },
+        rates: { inputPerMillion: 0, outputPerMillion: 1 },
+      }).projectedTotalUsd,
+    ).toBe(1);
+  });
+
+  it('names the plain-object rule when the check is not a plain object', () => {
+    expect(() => checkPreCallCeiling(null as never)).toThrowError(
+      'checkPreCallCeiling: check must be an object with spentSoFarUsd, ceilingUsd, estimatedNextCallUsage and rates ' +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
+    );
+  });
+});
+
+describe('checkPreCallCeiling — finite-result guards', () => {
+  it('rejects a projected total whose unrounded sum overflows', () => {
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: Number.MAX_VALUE,
+        ceilingUsd: Number.MAX_VALUE,
+        estimatedNextCallUsage: { inputTokens: Number.MAX_SAFE_INTEGER },
+        rates: { inputPerMillion: 1e290, outputPerMillion: 0 },
+      }),
+    ).toThrowError('checkPreCallCeiling: projected total must remain finite');
+  });
+});

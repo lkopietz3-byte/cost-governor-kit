@@ -696,3 +696,66 @@ describe('getRatesOrThrow — the table is a plain record and the model is a str
     expect(message).toContain('line1\\nline2');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Mutation-driven additions: exact messages, the remaining overflow guard and
+// the model list separator.
+// ---------------------------------------------------------------------------
+
+const PLAIN_HINT = '(a plain object; not null, an array, a Map, a Date or a class instance)';
+
+describe('exact error messages', () => {
+  it('names the plain-object rule for rates, usage, the log helper and the table', () => {
+    expect(() => estimateCostUsd(new Map() as unknown as ModelRates, {})).toThrowError(
+      `estimateCostUsd: rates must be an object with inputPerMillion and outputPerMillion ${PLAIN_HINT}`,
+    );
+    expect(() => estimateCostUsd(rates, new Map() as unknown as UsageTokens)).toThrowError(
+      `estimateCostUsd: usage must be an object of token counts ${PLAIN_HINT}`,
+    );
+    expect(() => formatRatesForLog(new Map() as unknown as ModelRates)).toThrowError(
+      `formatRatesForLog: rates must be an object with inputPerMillion and outputPerMillion ${PLAIN_HINT}`,
+    );
+    expect(() => getRatesOrThrow(new Map() as unknown as PricingTable, 'm')).toThrowError(
+      `getRatesOrThrow: table must be an object keyed by model id ${PLAIN_HINT}`,
+    );
+  });
+
+  it('lists the accepted usage fields after an unknown key', () => {
+    expect(() => estimateCostUsd(rates, { input_tokens: 5 } as unknown as UsageTokens)).toThrowError(
+      'estimateCostUsd: usage has unknown field "input_tokens"; expected only ' +
+        'inputTokens, outputTokens, cacheReadTokens, cacheCreation5mTokens, cacheCreation1hTokens',
+    );
+  });
+
+  it('names the model, lists every known model with a comma and space, and explains why there is no default', () => {
+    const two: PricingTable = { 'model-a': rates, 'model-b': rates };
+    expect(() => getRatesOrThrow(two, 'model-c')).toThrowError(
+      'cost-governor-kit: no pricing entry for model "model-c". Known models: model-a, model-b. ' +
+        'Add it to your pricing table rather than falling back to a default — a wrong default price ' +
+        'defeats the point of a cost ceiling.',
+    );
+  });
+
+  it('prints a string rate quoted and a non-number by kind in formatRatesForLog', () => {
+    expect(formatRatesForLog({ inputPerMillion: '3' as unknown as number, outputPerMillion: null as unknown as number })).toBe(
+      '$"3"/M in, $null/M out',
+    );
+  });
+});
+
+describe('estimateCostUsd — finite-result guards', () => {
+  it('rejects a cost whose sum overflows', () => {
+    expect(() =>
+      estimateCostUsd(
+        { inputPerMillion: Number.MAX_VALUE, outputPerMillion: Number.MAX_VALUE },
+        { inputTokens: Number.MAX_SAFE_INTEGER, outputTokens: Number.MAX_SAFE_INTEGER },
+      ),
+    ).toThrowError('estimateCostUsd: calculated cost must remain finite');
+  });
+
+  it('rejects a cost that is finite but overflows when rounded to micro-dollars', () => {
+    expect(() => estimateCostUsd({ inputPerMillion: Number.MAX_VALUE, outputPerMillion: 0 }, { inputTokens: 1 })).toThrowError(
+      'estimateCostUsd: rounded cost must remain finite',
+    );
+  });
+});

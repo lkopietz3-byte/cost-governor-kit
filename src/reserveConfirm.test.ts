@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   withCapacityReservation,
   withReserveConfirm,
@@ -1501,5 +1501,79 @@ describe('withReserveConfirm — a rejected commit is detected by presence, not 
     };
     const result = await withReserveConfirm(ledger, 'user', 5, async () => 'paid-result');
     expect(Object.hasOwn(result, 'commitError')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Mutation-driven additions: exact expiry boundary, outcome shape edge cases
+// and exact messages.
+// ---------------------------------------------------------------------------
+
+describe('withCapacityReservation — expiry is judged at the millisecond', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const request = { key: 'k', limit: 1, operationId: 'o' };
+  const at = (ms: number): CapacityReservationLedger =>
+    acquiringLedger((r) => ({ id: 'r-1', key: r.key, operationId: r.operationId, expiresAt: new Date(ms).toISOString() }));
+
+  it('rejects a hold that expires exactly now and accepts one that expires a millisecond later', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-28T12:00:00.000Z'));
+    const now = Date.now();
+    await expect(withCapacityReservation(at(now), request, okWork)).rejects.toThrow('adapter returned an expired reservation');
+    await expect(withCapacityReservation(at(now - 1), request, okWork)).rejects.toThrow('adapter returned an expired reservation');
+    await expect(withCapacityReservation(at(now + 1), request, okWork)).resolves.toMatchObject({ status: 'confirmed' });
+  });
+
+  it('does not require an in-progress hold to be unexpired (it is recovery metadata)', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-09-28T12:00:00.000Z'));
+    const expired: CapacityReservationLedger = {
+      reserveCapacity: async (r) => ({
+        status: 'operation_in_progress',
+        reservation: { id: 'r-1', key: r.key, operationId: r.operationId, expiresAt: new Date(Date.now() - 60_000).toISOString() },
+      }),
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    await expect(withCapacityReservation(expired, request, okWork)).resolves.toMatchObject({ status: 'operation_in_progress' });
+  });
+});
+
+describe('withCapacityReservation — outcome shape edge cases and messages', () => {
+  const request = { key: 'k', limit: 1, operationId: 'o' };
+  const ledger = () =>
+    acquiringLedger((r) => ({ id: 'r-1', key: r.key, operationId: r.operationId, expiresAt: futureIso() }));
+
+  it('does not accept a function that carries status and value properties', async () => {
+    const outcome = Object.assign(() => 1, { status: 'succeeded', value: 'x' });
+    const result = await withCapacityReservation(ledger(), request, async () => outcome as never);
+    expect(result.status).toBe('work_outcome_ambiguous');
+  });
+
+  it('does not treat an unknown status that happens to carry an error as a known failure', async () => {
+    const log: string[] = [];
+    const result = await withCapacityReservation(
+      acquiringLedger((r) => ({ id: 'r-1', key: r.key, operationId: r.operationId, expiresAt: futureIso() }), log),
+      request,
+      async () => ({ status: 'maybe', error: 'e', value: 'v' }) as never,
+    );
+    expect(result.status).toBe('work_outcome_ambiguous');
+    expect(log).toEqual(['reserve']);
+  });
+
+  it('says why an invalid outcome is ambiguous', async () => {
+    const result = await withCapacityReservation(ledger(), request, async () => 'nope' as never);
+    expect(result).toMatchObject({ status: 'work_outcome_ambiguous' });
+    expect((result as { error: Error }).error.message).toBe('withCapacityReservation: doTheWork returned an invalid outcome');
+  });
+
+  it('names the plain-object rule for a request that is not a plain object', async () => {
+    await expect(withCapacityReservation(ledger(), new Map() as never, okWork)).rejects.toThrowError(
+      'withCapacityReservation: request must be an object with key, limit and operationId ' +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
+    );
   });
 });

@@ -29,6 +29,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { compileFunction } from 'node:vm';
 import { PGlite } from '@electric-sql/pglite';
 import ts from 'typescript';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -229,7 +230,8 @@ function loadCommentedAdapter(client: RpcClient): SupabaseAdapterFactory {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext },
     reportDiagnostics: false,
   }).outputText;
-  return new Function('supabase', `${js}\nreturn supabaseUsageLedger;`)(client) as SupabaseAdapterFactory;
+  const build = compileFunction(`${js}\nreturn supabaseUsageLedger;`, ['supabase']) as (client: RpcClient) => SupabaseAdapterFactory;
+  return build(client);
 }
 
 /** A stub of the Supabase client's rpc(), answered by the real SQL functions on PGlite. */
