@@ -34,12 +34,23 @@ npm install cost-governor-kit
 ```
 
 Or build from source: clone the repository, then run `npm ci` and
-`npm run build`. Node 20 or later, no runtime dependencies. MIT licensed.
+`npm run build`. No runtime dependencies. MIT licensed.
 
-This is an ESM package (`"type": "module"`). `import` works everywhere;
-plain CommonJS `require("cost-governor-kit")` also works, but only on a Node
-version that supports `require(esm)` — Node 22.12+ or 20.19+. On an older
-Node, use dynamic `import()` from CommonJS instead.
+It is an ESM package (`"type": "module"`). `import` is the supported way to
+load it. `require()` also works where Node can `require(esm)`:
+
+| How you load it | Node 20.19+ | Node 22.12+ | Node 24 and 26 | Older Node 20 or 22 |
+| --- | --- | --- | --- | --- |
+| `import { estimateCostUsd } from 'cost-governor-kit'` | works | works | works | works |
+| `require('cost-governor-kit')` | works | works | works | fails (no `require(esm)`); use `import()` |
+
+ESM package; `require()` works on Node >=20.19 / >=22.12. Recommended runtimes
+are Node 22 and 24 (LTS) and Node 26 (current). Node 20 is end-of-life. CI
+still runs the tests and the installed-package checks on Node 20.19.0 and
+22.12.0 (the `require(esm)` floors) to catch regressions, but that is
+compatibility testing, not a recommendation. `engines` in `package.json` is
+`>=20`. TypeScript resolves the root and all three subpaths under `node10`,
+`node16`/`nodenext` and `bundler` resolution (checked by `attw` in CI).
 
 ## Quickstart
 
@@ -77,6 +88,17 @@ This exact script was run against the installed package; the comments show its
 output. The hand calculation for `0.0195`: 1,200 x 3 + 8,000 x 3 x 0.1 +
 2,000 x 3 x 1.25 + 400 x 15 = 19,500, divided by 1,000,000.
 
+**Input rules.** Every record you pass must be a plain object or a
+null-prototype object: `rates`, `usage`, the `checkPreCallCeiling` argument and
+its two nested records, a pricing table, and a `withCapacityReservation`
+request. A `Map`, `Set`, `Date`, `RegExp`, array or class instance throws a
+`TypeError` instead of being priced as zero usage or read as an empty table. A
+record made in another realm (`node:vm`) counts as plain. Each field is read
+once and the code validates and computes from that copy, so a getter or proxy
+that answers differently the second time cannot change a result. Error text
+built from your strings (a model name, an unknown usage key, a decision
+status) has control, line-break and bidi characters escaped.
+
 Every export above is also available from its own subpath — `cost-governor-kit/pricing`,
 `cost-governor-kit/preCallCeiling`, `cost-governor-kit/reserveConfirm` — importing the
 same module either way. Use a subpath if you only want one job's code in your
@@ -109,10 +131,12 @@ supply it, otherwise `inRate x 0.1`.
   `cacheCreation5mTokens`, `cacheCreation1hTokens`. Each is optional and
   defaults to 0 when omitted or `undefined`; a supplied value must be a
   non-negative safe integer.
-- Throws for invalid rates, a `usage` that is not a plain object (including
-  `null` and arrays), an invalid count (`null`, fractional, negative, NaN,
-  Infinity, beyond `Number.MAX_SAFE_INTEGER`), **any unknown key**, or a
-  non-finite result. Messages name the field but not the rejected value.
+- Throws for `rates` or `usage` that is not a plain object (`null`, an array,
+  a `Map`, `Set`, `Date`, `RegExp` or class instance), invalid rates, an invalid
+  count (`null`, fractional, negative, NaN, Infinity, beyond
+  `Number.MAX_SAFE_INTEGER`), **any unknown key**, or a non-finite result.
+  Messages name the field but not the rejected value (an unknown key is echoed,
+  escaped).
 
 Unknown keys throw so that a provider payload passed as-is is not priced at $0.
 Map an Anthropic `usage` block like this (`input_tokens` is the uncached
@@ -168,12 +192,18 @@ fold them into the two rates you pass.
 Looks `model` up in your `PricingTable` (`Record<string, ModelRates>`). Throws,
 listing the known models, when there is no entry. Only the table's own keys
 match: `constructor`, `toString` and `__proto__` throw like any unknown model.
-The returned entry is not validated here; `estimateCostUsd` validates it on use.
+`model` must be a string and `table` a plain object: a `String` object, an
+array or an object with a `toString` is a `TypeError`, not a key, and a `Map` is
+a `TypeError`, not an empty table. The returned entry is not validated here;
+`estimateCostUsd` validates it on use.
 
 ### `formatRatesForLog(rates): string`
 
 Returns e.g. `"$3/M in, $15/M out"` for logging on every run, so a stale rate is
-visible. It does not validate or round (`NaN` prints as `$NaN/M`).
+visible. It does not validate or round (`NaN` prints as `$NaN/M`). A value that
+is not a number prints by kind, and a string prints quoted with control and bidi
+characters escaped, so a bad rate cannot forge a log line. `rates` must be a
+plain object.
 
 ---
 
@@ -190,9 +220,12 @@ the total to the micro-dollar, and returns:
 - `reason`: only when denied, a sentence with the amounts
 
 It is pure: no I/O, no clock, no stored state, and it does not mutate its input.
-It throws when `rates` is missing or invalid, when `spentSoFarUsd` or
-`ceilingUsd` is not a finite number >= 0 (these two messages include the value),
-for an invalid usage estimate, or when the total is not finite.
+It throws when the argument, `rates` or the usage estimate is not a plain object
+(a `Map` usage estimate throws under a $0 ceiling instead of being allowed as
+zero usage), when `rates` is missing or invalid, when `spentSoFarUsd` or
+`ceilingUsd` is not a finite number >= 0 (these two messages include the value,
+safely rendered), for an invalid usage estimate, or when the total is not
+finite. The rates check runs before the ceiling and spend checks.
 
 ```js
 let spentSoFarUsd = 0;
@@ -228,9 +261,13 @@ import { withReserveConfirm, type UsageLedger } from 'cost-governor-kit/reserveC
 
 declare const myLedger: UsageLedger; // your storage
 
+// Inside your request handler (the `return`s below belong to it):
+const today = '2026-09-28'; // your window key, for example the UTC date
 const result = await withReserveConfirm(myLedger, `${userId}:${today}`, 5, () => callYourLlmApi(prompt));
 if (!result.allowed) return send429('Daily limit reached');
-if (result.commitError) logForReconciliation(result.commitError); // usage may be under-recorded
+// Test for presence, not truthiness: a ledger can reject with undefined, null,
+// false, 0 or '', and every one of those is falsy.
+if (Object.hasOwn(result, 'commitError')) logForReconciliation(result.commitError); // usage may be under-recorded
 return send200(result.result);
 ```
 
@@ -248,8 +285,10 @@ return send200(result.result);
    If it rejects, the paid call already happened and its result is **not**
    discarded: this returns `{ allowed: true, result, commitError }` instead of
    rejecting, where `commitError` is whatever `commitUsage` rejected with. The
-   presence of `commitError` is your signal that the usage count may be
-   under-recorded for this call — log it and reconcile.
+   presence of `commitError` (check `Object.hasOwn(result, 'commitError')`) is
+   your signal that the usage count may be under-recorded for this call — log
+   it and reconcile. The value `commitUsage` resolves is ignored, so an adapter
+   must reject, not resolve `false`, when it did not record the usage.
 
 It is **advisory under concurrency**: concurrent requests can all pass the
 check before any of them commits, so the limit can be exceeded (a test runs 10
@@ -262,6 +301,8 @@ import { withCapacityReservation, type CapacityReservationLedger } from 'cost-go
 
 declare const ledger: CapacityReservationLedger; // your atomic, durable adapter
 
+// Inside your request handler (the `return`s below belong to it):
+const today = '2026-09-28'; // your window key, for example the UTC date
 const result = await withCapacityReservation(
   ledger,
   { key: `${userId}:${today}`, limit: 5, operationId: requestId }, // reuse requestId on every retry
@@ -288,13 +329,21 @@ concurrent requests at limit 3 all run.
 
 **What the helper itself guarantees, with any adapter:**
 
-- It validates the request first. A `limit` that is not a safe integer >= 0, or
-  an empty `key` or `operationId`, throws without calling the adapter. `limit: 0`
-  is passed to the adapter, which should deny; the helper does not deny locally.
+- It reads the request once and validates that copy. A request that is not a
+  plain object, a `limit` that is not a safe integer >= 0, or a blank `key` or
+  `operationId` throws without calling the adapter. Blank means empty or only
+  whitespace and invisible characters (zero-width spaces, bidi controls, the
+  soft hyphen and similar). `limit: 0` is passed to the adapter, which should
+  deny; the helper does not deny locally. The adapter receives a fresh
+  `{ key, limit, operationId }` copy, and every later comparison uses the
+  validated values, so neither your changing the request object mid-flight nor
+  the adapter editing its argument can change what a reservation is checked
+  against.
 - It calls `reserveCapacity` once and `doTheWork` at most once, and only for an
-  `acquired` decision whose reservation has a non-empty `id`, the request's
+  `acquired` decision whose reservation has a non-blank `id`, the request's
   `key` and `operationId`, and an `expiresAt` later than this process's
-  `Date.now()`. A malformed or unknown decision throws before any work. If the
+  `Date.now()` (compared as instants, and read once along with the rest of the
+  decision, reservation and outcome). A malformed or unknown decision throws before any work. If the
   adapter did create a hold, the helper leaves it in place (it does not release
   a hold it cannot trust), and with a conforming adapter a retry with the same
   `operationId` then gets `operation_in_progress`.
@@ -333,8 +382,10 @@ the provider again.
 
 [`reference-impl/supabase-usage-ledger.sql`](reference-impl/supabase-usage-ledger.sql)
 implements the advisory `UsageLedger` as two Postgres functions, with a
-TypeScript adapter sketch in a comment. It does **not** implement
-`CapacityReservationLedger`. Its commit re-checks the limit under a row lock, so
+TypeScript adapter sketch in a comment. In that sketch, `commitUsage` rejects
+when the RPC answers `committed: false` or something malformed, so
+`withReserveConfirm` returns the paid result with `commitError` set. It does
+**not** implement `CapacityReservationLedger`. Its commit re-checks the limit under a row lock, so
 the recorded count never exceeds the limit, but two requests that both passed
 the check still both make the paid call; the second is simply not recorded.
 
@@ -343,8 +394,14 @@ the check still both make the paid call; the second is simply not recorded.
 (so CI runs it on every push) and checks: a role with no explicit grant is
 denied on both functions and `service_role` is allowed (the round-1 grant
 fix), the Supabase `anon`/`authenticated` revoke branch, fresh-key and
-window-rollover behavior, and the limit-reached and limit-0 cases. **PGlite is
-a single connection**, so this test proves nothing about concurrent
+window-rollover behavior, and the limit-reached and limit-0 cases. The same file
+extracts the commented adapter, strips its types with the TypeScript compiler
+and runs it against these functions through a stub of the Supabase client's
+`rpc()` method, inside `withReserveConfirm`: a real `committed: false` (another
+request took the last slot during the paid call), a missing or malformed row
+and an RPC error each come back as the paid result with `commitError` set, and
+the provider callback runs once. `@supabase/supabase-js` itself is not run.
+**PGlite is a single connection**, so this test proves nothing about concurrent
 sessions — the file's own header comment covers what happens then. It was
 not run against a live Supabase project. It ships in the npm tarball as
 copy-and-adapt reference material; nothing imports it.
@@ -404,12 +461,24 @@ behavior under a network partition or Postgres failover.
   is over-estimated unless you set `ModelRates.cacheReadPerMillion` (see
   above). Server-tool fees, such as per-search charges, are not modeled.
 - **No price data.** Rates you pass can be stale; the library cannot tell.
+- **A count limit is not a dollar budget.** `withCapacityReservation` counts units, and
+  `checkPreCallCeiling` compares an estimate against a spend total you supply. Neither
+  locks a shared dollar budget or settles the difference between estimated and billed cost.
 - **The strict limit lives in your adapter.** This kit ships no
   `CapacityReservationLedger`, and its tests use single-process in-memory
   doubles, which prove the helper's call sequencing, not any real storage.
 - **`withReserveConfirm` is advisory**, returns the successful result with a
   `commitError` field (instead of discarding it) if the commit fails, and
-  passes `limit` through unvalidated.
+  passes `key` and `limit` through unvalidated. It ignores the value
+  `commitUsage` resolves, so only a rejection reports an unrecorded commit.
+- **Copies are shallow and only for the records this kit reads.** Each field of
+  your rates, usage, check and request is read once, but nothing is deep-cloned
+  or frozen, and the reservation object your adapter returns is handed back to
+  it as is.
+- **The SQL adapter example is a sketch.** Its tests run it through a stub of
+  the Supabase client on a single PGlite connection. It was not run with
+  `@supabase/supabase-js`, against a live Supabase project, or under concurrent
+  sessions.
 - **Clock skew.** A newly acquired hold must expire later than this process's
   `Date.now()`. If your app's clock runs ahead of your database's by more than
   the hold's lifetime, every acquire is rejected (and each hold is left for

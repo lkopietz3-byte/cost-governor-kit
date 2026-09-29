@@ -5,7 +5,7 @@ Mapped on **2026-09-26** from connected GitHub, Vercel, and Supabase metadata. T
 ## Identity and repository settings
 
 - Repository: [lkopietz3-byte/cost-governor-kit](https://github.com/lkopietz3-byte/cost-governor-kit)
-- Purpose: A library for enforcing pre-call AI spending limits, calculating usage costs, and counting successful usage safely under concurrent requests.
+- Purpose: A library of pre-call dollar-ceiling arithmetic, cache-aware token pricing with caller-supplied rates, and helpers that count usage around a paid call. `withReserveConfirm` is advisory under concurrency; the strict `withCapacityReservation` orchestrator is only as strict as the storage adapter you write (none is shipped). It estimates cost, does not check provider billing, and a unit-count cap is not a variable-dollar budget. See the README's "Honest limits".
 - GitHub visibility: **public**; default branch: **`main`**; archived: **no**.
 - Product stage, owner, production health, and GitHub protection/settings beyond the fields above: **not verified**.
 

@@ -150,7 +150,9 @@ export async function withReserveConfirm<T>(
 /**
  * Result of {@link withReserveConfirm}. `commitError` is present only when
  * `commitUsage` rejected after a successful call; its absence means the call
- * both succeeded and was recorded.
+ * both succeeded and was recorded. Check for it with
+ * `Object.hasOwn(result, 'commitError')`, not truthiness: the rejection value
+ * can be `undefined`, `null`, `false`, `0` or `''`.
  */
 export type ReserveConfirmResult<T> =
   | { allowed: true; result: T; commitError?: unknown }
@@ -222,8 +224,16 @@ export type ReserveCapacityResult =
  * alone never proves possibly executing work is safe to release.
  */
 export interface CapacityReservationLedger {
+  /**
+   * Atomically decide and, when capacity is available, record one hold for
+   * `(request.key, request.operationId)`. Receives a fresh
+   * `{ key, limit, operationId }` copy of the validated request. A repeated
+   * `(key, operationId)` must never create a second hold.
+   */
   reserveCapacity(request: ReserveCapacityRequest): Promise<ReserveCapacityResult>;
+  /** Turn a hold into confirmed usage. Must be idempotent. Called once, after `succeeded` work. */
   confirmReservation(reservation: CapacityReservation): Promise<void>;
+  /** Drop a hold without counting it. Must be idempotent. Called once, only after work reported `failed`. */
   releaseReservation(reservation: CapacityReservation): Promise<void>;
 }
 
