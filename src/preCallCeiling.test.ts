@@ -367,3 +367,206 @@ describe('checkPreCallCeiling — invalid estimates fail closed', () => {
     ).toThrow(/rounded projected total.*finite/i);
   });
 });
+
+// ---------------------------------------------------------------------------
+// CGK-001 at the ceiling level: a malformed container must throw before any
+// allow/deny decision, including under a $0 ceiling where "zero usage" would
+// have been allowed.
+// ---------------------------------------------------------------------------
+
+class UsageClass {
+  inputTokens = 1_000_000;
+}
+
+const nonPlain: ReadonlyArray<readonly [string, unknown]> = [
+  ['a Map', new Map([['inputTokens', 1_000_000]])],
+  ['a Set', new Set(['inputTokens'])],
+  ['a Date', new Date(0)],
+  ['a RegExp', /inputTokens/],
+  ['a class instance', new UsageClass()],
+];
+
+describe('checkPreCallCeiling — malformed containers never reach a cost decision (CGK-001)', () => {
+  it.each(nonPlain)('rejects %s as estimatedNextCallUsage even under a zero-dollar ceiling', (_label, usage) => {
+    const check = () =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 0,
+        estimatedNextCallUsage: usage as UsageTokens,
+        rates,
+      });
+    expect(check).toThrow(TypeError);
+    expect(check).toThrow(/usage must be an object of token counts/);
+  });
+
+  it.each(nonPlain)('rejects %s as rates', (_label, badRates) => {
+    const check = () =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 100,
+        estimatedNextCallUsage: {},
+        rates: badRates as ModelRates,
+      });
+    expect(check).toThrow(TypeError);
+    expect(check).toThrow(/rates.*required/is);
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a Map', new Map()],
+    ['an array', []],
+    ['a class instance', new UsageClass()],
+  ])('rejects %s as the check itself with a TypeError', (_label, badCheck) => {
+    expect(() => checkPreCallCeiling(badCheck as never)).toThrow(TypeError);
+    expect(() => checkPreCallCeiling(badCheck as never)).toThrow(/check must be an object/);
+  });
+
+  it('still accepts null-prototype records for the check, the rates and the usage', () => {
+    const bare = <T extends object>(value: T): T => Object.assign(Object.create(null) as T, value);
+    const result = checkPreCallCeiling(
+      bare({
+        spentSoFarUsd: 0,
+        ceilingUsd: 3,
+        estimatedNextCallUsage: bare({ inputTokens: 1_000_000 }),
+        rates: bare({ inputPerMillion: 3, outputPerMillion: 15 }),
+      }),
+    );
+    expect(result.allowed).toBe(true);
+    expect(result.projectedTotalUsd).toBe(3);
+  });
+
+  it('keeps the exact rounding regression values', () => {
+    const result = checkPreCallCeiling({
+      spentSoFarUsd: 24.99,
+      ceilingUsd: 25,
+      estimatedNextCallUsage: { inputTokens: 2_000, outputTokens: 500 },
+      rates,
+    });
+    expect(result.projectedNextCallCostUsd).toBe(0.0135);
+    expect(result.projectedTotalUsd).toBe(25.0035);
+    expect(result.allowed).toBe(false);
+  });
+});
+
+describe('checkPreCallCeiling — caller input is read once', () => {
+  it('validates and decides on the same ceiling and echoes it', () => {
+    let reads = 0;
+    const flipping = {
+      spentSoFarUsd: 1,
+      get ceilingUsd(): number {
+        reads++;
+        return reads === 1 ? 5 : 0;
+      },
+      estimatedNextCallUsage: { inputTokens: 10_000 },
+      rates,
+    };
+    const result = checkPreCallCeiling(flipping);
+    expect(result.allowed).toBe(true);
+    expect(result.ceilingUsd).toBe(5);
+    expect(reads).toBe(1);
+  });
+
+  it('validates and decides on the same spentSoFarUsd', () => {
+    let reads = 0;
+    const flipping = {
+      get spentSoFarUsd(): number {
+        reads++;
+        return reads === 1 ? 1 : -1_000;
+      },
+      ceilingUsd: 5,
+      estimatedNextCallUsage: { inputTokens: 10_000 },
+      rates,
+    };
+    const result = checkPreCallCeiling(flipping);
+    expect(result.projectedTotalUsd).toBe(1.03);
+    expect(reads).toBe(1);
+  });
+
+  it('reads check.rates and each rate once, so a rate that flips negative cannot bypass the ceiling', () => {
+    let rateReads = 0;
+    let inputReads = 0;
+    const check = {
+      spentSoFarUsd: 4.99,
+      ceilingUsd: 5,
+      estimatedNextCallUsage: { inputTokens: 1_000_000 },
+      get rates(): ModelRates {
+        rateReads++;
+        return {
+          get inputPerMillion(): number {
+            inputReads++;
+            return inputReads === 1 ? 3 : -1_000;
+          },
+          outputPerMillion: 15,
+        };
+      },
+    };
+    const result = checkPreCallCeiling(check);
+    expect(result.projectedNextCallCostUsd).toBe(3);
+    expect(result.allowed).toBe(false);
+    expect(rateReads).toBe(1);
+    expect(inputReads).toBe(1);
+  });
+
+  it('reads estimatedNextCallUsage once', () => {
+    let reads = 0;
+    const check = {
+      spentSoFarUsd: 0,
+      ceilingUsd: 5,
+      get estimatedNextCallUsage(): UsageTokens {
+        reads++;
+        return { inputTokens: 1_000 };
+      },
+      rates,
+    };
+    checkPreCallCeiling(check);
+    expect(reads).toBe(1);
+  });
+});
+
+describe('checkPreCallCeiling — error text cannot be broken by a hostile value', () => {
+  const hostile = {
+    toString(): string {
+      throw new RangeError('boom');
+    },
+  };
+  const nullProto = Object.create(null) as object;
+
+  it.each([
+    ['a throwing toString', hostile],
+    ['a null-prototype object', nullProto],
+    ['a symbol', Symbol('x')],
+    ['a bigint', 5n],
+  ])('reports %s as ceilingUsd with a TypeError that names the field', (_label, ceilingUsd) => {
+    const check = () =>
+      checkPreCallCeiling({ spentSoFarUsd: 0, ceilingUsd: ceilingUsd as number, estimatedNextCallUsage: {}, rates });
+    expect(check).toThrow(TypeError);
+    expect(check).toThrow(/ceilingUsd must be a non-negative finite number/);
+  });
+
+  it.each([
+    ['a throwing toString', hostile],
+    ['a null-prototype object', nullProto],
+  ])('reports %s as spentSoFarUsd with a TypeError that names the field', (_label, spentSoFarUsd) => {
+    const check = () =>
+      checkPreCallCeiling({ spentSoFarUsd: spentSoFarUsd as number, ceilingUsd: 5, estimatedNextCallUsage: {}, rates });
+    expect(check).toThrow(TypeError);
+    expect(check).toThrow(/spentSoFarUsd must be a non-negative finite number/);
+  });
+
+  it('does not echo a rejected string value verbatim (control characters are escaped)', () => {
+    let message = '';
+    try {
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 'x\u001b[31m\n\u202e' as unknown as number,
+        estimatedNextCallUsage: {},
+        rates,
+      });
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toMatch(/ceilingUsd must be a non-negative finite number/);
+    expect(message).not.toMatch(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/);
+  });
+});

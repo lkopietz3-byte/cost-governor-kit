@@ -1002,3 +1002,504 @@ describe('withReserveConfirm — advisory behavior, pinned', () => {
     ]);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Audit fix pass: caller input is read once, records must be plain, blank
+// means "shows nothing", adapter-returned shapes are guarded, and error text
+// built from adapter strings is escaped.
+// ---------------------------------------------------------------------------
+
+// Every character below is either whitespace or Default_Ignorable_Code_Point,
+// so a string made only of them shows nothing on screen or in a log.
+const visiblyBlank: ReadonlyArray<readonly [string, string]> = [
+  ['a zero-width space', '\u200B'],
+  ['a zero-width joiner', '\u200D'],
+  ['a word joiner', '\u2060'],
+  ['a byte order mark', '\uFEFF'],
+  ['a soft hyphen', '\u00AD'],
+  ['an Arabic letter mark', '\u061C'],
+  ['bidi isolates', '\u2066\u2069'],
+  ['a bidi override pair', '\u202A\u202C'],
+  ['a variation selector', '\uFE0F'],
+  ['a Hangul filler', '\u3164'],
+  ['whitespace mixed with invisibles', ' \t\u200B\u2066 \n'],
+];
+
+const hostileText = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/;
+
+const okWork = async () => ({ status: 'succeeded' as const, value: 'paid' });
+
+function acquiringLedger(
+  build: (request: ReserveCapacityRequest) => CapacityReservation,
+  log: string[] = [],
+): CapacityReservationLedger {
+  return {
+    reserveCapacity: async (request) => {
+      log.push('reserve');
+      return { status: 'acquired', reservation: build(request) };
+    },
+    confirmReservation: async () => {
+      log.push('confirm');
+    },
+    releaseReservation: async () => {
+      log.push('release');
+    },
+  };
+}
+
+describe('withCapacityReservation — the request is read once and validated as a snapshot', () => {
+  it('still compares the reservation with the values the adapter was asked for when the caller mutates the request mid-flight', async () => {
+    const request = { key: 'user-1', limit: 1, operationId: 'op-1' };
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async (received) => {
+        // The caller (or another task) changes its own object while the adapter is awaiting.
+        request.key = 'someone-else';
+        request.operationId = 'another-op';
+        await Promise.resolve();
+        return {
+          status: 'acquired',
+          reservation: { id: 'r-1', key: received.key, operationId: received.operationId, expiresAt: futureIso() },
+        };
+      },
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    const result = await withCapacityReservation(ledger, request, okWork);
+    expect(result.status).toBe('confirmed');
+    if (result.status === 'confirmed') {
+      expect(result.reservation.key).toBe('user-1');
+      expect(result.reservation.operationId).toBe('op-1');
+    }
+  });
+
+  it('does not let a key that changes between reads smuggle in a reservation for a different key', async () => {
+    let keyReads = 0;
+    const request = {
+      get key(): string {
+        keyReads++;
+        return keyReads === 1 ? 'user-1' : 'user-2';
+      },
+      limit: 1,
+      operationId: 'op-1',
+    };
+    const ledger = acquiringLedger((received) => ({
+      id: 'r-1',
+      key: 'user-2',
+      operationId: received.operationId,
+      expiresAt: futureIso(),
+    }));
+    const work = { calls: 0 };
+    await expect(withCapacityReservation(ledger, request, countingWork(work))).rejects.toThrow(
+      'reservation key does not match request',
+    );
+    expect(work.calls).toBe(0);
+    expect(keyReads).toBe(1);
+  });
+
+  it('hands the adapter a copy, so an adapter that edits its argument cannot change what the helper compares against', async () => {
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async (received) => {
+        const reservation = { id: 'r-1', key: received.key, operationId: received.operationId, expiresAt: futureIso() };
+        received.key = 'edited-by-adapter';
+        received.operationId = 'edited-by-adapter';
+        return { status: 'acquired', reservation };
+      },
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    const original = { key: 'user-1', limit: 1, operationId: 'op-1' };
+    await expect(withCapacityReservation(ledger, original, okWork)).resolves.toMatchObject({ status: 'confirmed' });
+    expect(original).toEqual({ key: 'user-1', limit: 1, operationId: 'op-1' });
+  });
+
+  it('reads limit, key and operationId once each', async () => {
+    const reads = { limit: 0, key: 0, operationId: 0 };
+    const request: ReserveCapacityRequest = {
+      get limit(): number {
+        reads.limit++;
+        return 1;
+      },
+      get key(): string {
+        reads.key++;
+        return 'user-1';
+      },
+      get operationId(): string {
+        reads.operationId++;
+        return 'op-1';
+      },
+    };
+    const ledger = acquiringLedger((received) => ({
+      id: 'r-1',
+      key: received.key,
+      operationId: received.operationId,
+      expiresAt: futureIso(),
+    }));
+    await withCapacityReservation(ledger, request, okWork);
+    expect(reads).toEqual({ limit: 1, key: 1, operationId: 1 });
+  });
+
+  it('passes the adapter exactly { key, limit, operationId }', async () => {
+    const seen: unknown[] = [];
+    const ledger = acquiringLedger((received) => {
+      seen.push(received);
+      return { id: 'r-1', key: received.key, operationId: received.operationId, expiresAt: futureIso() };
+    });
+    await withCapacityReservation(ledger, { key: 'k', limit: 2, operationId: 'o' }, okWork);
+    expect(seen).toEqual([{ key: 'k', limit: 2, operationId: 'o' }]);
+  });
+});
+
+describe('withCapacityReservation — the request must be a plain record', () => {
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a Map', new Map([['key', 'k']])],
+    ['an array', ['k', 1, 'o']],
+    ['a Date', new Date(0)],
+    ['a class instance', new (class Req { key = 'k'; limit = 1; operationId = 'o'; })()],
+  ])('rejects %s with a TypeError before calling the adapter', async (_label, request) => {
+    const ledger = new FakeCapacityLedger();
+    await expect(withCapacityReservation(ledger, request as never, okWork)).rejects.toThrow(TypeError);
+    await expect(withCapacityReservation(ledger, request as never, okWork)).rejects.toThrow(/request must be an object/);
+    expect(ledger.reserveCalls).toEqual([]);
+  });
+
+  it('accepts a null-prototype request', async () => {
+    const ledger = new FakeCapacityLedger();
+    const request = Object.assign(Object.create(null) as ReserveCapacityRequest, {
+      key: 'k',
+      limit: 1,
+      operationId: 'o',
+    });
+    await expect(withCapacityReservation(ledger, request, okWork)).resolves.toMatchObject({ status: 'confirmed' });
+  });
+});
+
+describe('withCapacityReservation — the adapter decision and reservation are read once', () => {
+  it('reads decision.status, decision.reservation and each reservation field once', async () => {
+    const reads: Record<string, number> = {};
+    const count = (name: string) => {
+      reads[name] = (reads[name] ?? 0) + 1;
+    };
+    const expiresAt = futureIso();
+    const reservation = {
+      get id(): string {
+        count('id');
+        return 'r-1';
+      },
+      get key(): string {
+        count('key');
+        return 'user-1';
+      },
+      get operationId(): string {
+        count('operationId');
+        return 'op-1';
+      },
+      get expiresAt(): string {
+        count('expiresAt');
+        return expiresAt;
+      },
+    };
+    const decision = {
+      get status(): 'acquired' {
+        count('status');
+        return 'acquired';
+      },
+      get reservation(): CapacityReservation {
+        count('reservation');
+        return reservation;
+      },
+    };
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async () => decision,
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    const result = await withCapacityReservation(ledger, { key: 'user-1', limit: 1, operationId: 'op-1' }, okWork);
+    expect(result.status).toBe('confirmed');
+    expect(reads).toEqual({ status: 1, reservation: 1, id: 1, key: 1, operationId: 1, expiresAt: 1 });
+  });
+
+  it('reads the outcome status, value and error once', async () => {
+    const reads: Record<string, number> = {};
+    const count = (name: string) => {
+      reads[name] = (reads[name] ?? 0) + 1;
+    };
+    const succeeded = {
+      get status(): 'succeeded' {
+        count('status');
+        return 'succeeded';
+      },
+      get value(): string {
+        count('value');
+        return 'paid';
+      },
+    };
+    const ledger = acquiringLedger((r) => ({ id: 'r-1', key: r.key, operationId: r.operationId, expiresAt: futureIso() }));
+    const ok = await withCapacityReservation(ledger, { key: 'k', limit: 1, operationId: 'o' }, async () => succeeded);
+    expect(ok).toMatchObject({ status: 'confirmed', value: 'paid' });
+    expect(reads).toEqual({ status: 1, value: 1 });
+
+    const failedReads: Record<string, number> = {};
+    const failed = {
+      get status(): 'failed' {
+        failedReads.status = (failedReads.status ?? 0) + 1;
+        return 'failed';
+      },
+      get error(): string {
+        failedReads.error = (failedReads.error ?? 0) + 1;
+        return 'nope';
+      },
+    };
+    const released = await withCapacityReservation(ledger, { key: 'k', limit: 1, operationId: 'o' }, async () => failed);
+    expect(released).toMatchObject({ status: 'released_after_failure', error: 'nope' });
+    expect(failedReads).toEqual({ status: 1, error: 1 });
+  });
+});
+
+describe('withCapacityReservation — a key, operationId or reservation id that shows nothing is blank', () => {
+  it.each(visiblyBlank)('rejects %s as the key with a RangeError before calling the adapter', async (_label, key) => {
+    const ledger = new FakeCapacityLedger();
+    await expect(withCapacityReservation(ledger, { key, limit: 1, operationId: 'op' }, okWork)).rejects.toThrow(RangeError);
+    await expect(withCapacityReservation(ledger, { key, limit: 1, operationId: 'op' }, okWork)).rejects.toThrow(
+      'key must be a non-empty string',
+    );
+    expect(ledger.reserveCalls).toEqual([]);
+  });
+
+  it.each(visiblyBlank)('rejects %s as the operationId with a RangeError before calling the adapter', async (_label, operationId) => {
+    const ledger = new FakeCapacityLedger();
+    await expect(withCapacityReservation(ledger, { key: 'k', limit: 1, operationId }, okWork)).rejects.toThrow(RangeError);
+    await expect(withCapacityReservation(ledger, { key: 'k', limit: 1, operationId }, okWork)).rejects.toThrow(
+      'operationId must be a non-empty string',
+    );
+    expect(ledger.reserveCalls).toEqual([]);
+  });
+
+  it.each(visiblyBlank)('rejects %s as a reservation id before any work runs', async (_label, id) => {
+    const ledger = acquiringLedger((r) => ({ id, key: r.key, operationId: r.operationId, expiresAt: futureIso() }));
+    const work = { calls: 0 };
+    await expect(withCapacityReservation(ledger, { key: 'k', limit: 1, operationId: 'o' }, countingWork(work))).rejects.toThrow(
+      'reservation id must be a non-empty string',
+    );
+    expect(work.calls).toBe(0);
+  });
+
+  it('rejects a blank reservation id on an in-progress hold too', async () => {
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async (r) => ({
+        status: 'operation_in_progress',
+        reservation: { id: '\u200B', key: r.key, operationId: r.operationId, expiresAt: futureIso() },
+      }),
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    await expect(withCapacityReservation(ledger, { key: 'k', limit: 1, operationId: 'o' }, okWork)).rejects.toThrow(RangeError);
+  });
+
+  it('accepts a key that has visible text next to invisible characters', async () => {
+    const ledger = new FakeCapacityLedger();
+    const key = '\u200Buser\u2066-1\u200B';
+    await expect(withCapacityReservation(ledger, { key, limit: 1, operationId: '\u00ADop' }, okWork)).resolves.toMatchObject({
+      status: 'confirmed',
+    });
+    expect(ledger.reserveCalls[0]?.key).toBe(key);
+  });
+});
+
+describe('withCapacityReservation — adapter-returned shapes are guarded', () => {
+  const request = { key: 'user-1', limit: 1, operationId: 'op-1' };
+  const base = (): CapacityReservation => ({ id: 'r-1', key: 'user-1', operationId: 'op-1', expiresAt: futureIso() });
+
+  function returning(decision: unknown, log: string[] = []): CapacityReservationLedger {
+    return {
+      reserveCapacity: async () => decision as never,
+      confirmReservation: async () => {
+        log.push('confirm');
+      },
+      releaseReservation: async () => {
+        log.push('release');
+      },
+    };
+  }
+
+  it.each([
+    ['null', null],
+    ['a string', 'r-1'],
+    ['a number', 7],
+    ['undefined', undefined],
+  ])('rejects %s as an acquired reservation with a TypeError and runs no work', async (_label, reservation) => {
+    const work = { calls: 0 };
+    const log: string[] = [];
+    const ledger = returning({ status: 'acquired', reservation }, log);
+    await expect(withCapacityReservation(ledger, request, countingWork(work))).rejects.toThrow(TypeError);
+    await expect(withCapacityReservation(ledger, request, countingWork(work))).rejects.toThrow(
+      'adapter returned an invalid reservation',
+    );
+    expect(work.calls).toBe(0);
+    expect(log).toEqual([]);
+  });
+
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+  ])('rejects %s as an in-progress reservation with a TypeError', async (_label, reservation) => {
+    const ledger = returning({ status: 'operation_in_progress', reservation });
+    await expect(withCapacityReservation(ledger, request, okWork)).rejects.toThrow(TypeError);
+    await expect(withCapacityReservation(ledger, request, okWork)).rejects.toThrow('adapter returned an invalid reservation');
+  });
+
+  it.each([
+    ['a number', 7],
+    ['undefined', undefined],
+    ['null', null],
+  ])('rejects %s as a reservation id with a TypeError', async (_label, id) => {
+    const ledger = returning({ status: 'acquired', reservation: { ...base(), id } });
+    await expect(withCapacityReservation(ledger, request, okWork)).rejects.toThrow(TypeError);
+    await expect(withCapacityReservation(ledger, request, okWork)).rejects.toThrow('reservation id must be a non-empty string');
+  });
+
+  it.each([
+    ['a number', 0],
+    ['a Date', new Date(Date.now() + 60_000)],
+    ['undefined', undefined],
+    ['null', null],
+  ])('rejects %s as expiresAt with a TypeError', async (_label, expiresAt) => {
+    const ledger = returning({ status: 'acquired', reservation: { ...base(), expiresAt } });
+    await expect(withCapacityReservation(ledger, request, okWork)).rejects.toThrow(TypeError);
+    await expect(withCapacityReservation(ledger, request, okWork)).rejects.toThrow(
+      'reservation expiresAt must be a valid ISO-8601 timestamp',
+    );
+  });
+
+  it('never treats a missing or non-string identity as a match (undefined does not equal undefined)', async () => {
+    const ledger = returning({ status: 'acquired', reservation: { id: 'r-1', expiresAt: futureIso() } });
+    await expect(withCapacityReservation(ledger, request, okWork)).rejects.toThrow(RangeError);
+    const terminal = returning({ status: 'operation_terminal' });
+    await expect(withCapacityReservation(terminal, request, okWork)).rejects.toThrow(
+      'adapter terminal decision operationId does not match request',
+    );
+  });
+
+  it('compares expiry as an instant: a later offset spelling of an already-past instant is still expired', async () => {
+    const past = Date.now() - 1_000;
+    const asOffset = new Date(past).toISOString().replace('Z', '+00:00');
+    const ledger = returning({ status: 'acquired', reservation: { ...base(), expiresAt: asOffset } });
+    await expect(withCapacityReservation(ledger, request, okWork)).rejects.toThrow('adapter returned an expired reservation');
+  });
+
+  it.each([
+    ['null', null],
+    ['a string', 'succeeded'],
+    ['an array', ['succeeded']],
+    ['an unknown status', { status: 'maybe', value: 1 }],
+    ['a missing status', { value: 1 }],
+    ['a truthy non-status', { status: true, value: 1 }],
+    ['a failed outcome without error', { status: 'failed' }],
+    ['a succeeded outcome without value', { status: 'succeeded' }],
+  ])('treats %s as an ambiguous outcome and keeps the hold', async (_label, outcome) => {
+    const log: string[] = [];
+    const ledger = acquiringLedger((r) => ({ id: 'r-1', key: r.key, operationId: r.operationId, expiresAt: futureIso() }), log);
+    const result = await withCapacityReservation(ledger, request, async () => outcome as never);
+    expect(result.status).toBe('work_outcome_ambiguous');
+    expect(log).toEqual(['reserve']);
+  });
+
+  it('accepts an outcome whose payload is present but undefined (own property)', async () => {
+    const ledger = acquiringLedger((r) => ({ id: 'r-1', key: r.key, operationId: r.operationId, expiresAt: futureIso() }));
+    await expect(
+      withCapacityReservation(ledger, request, async () => ({ status: 'succeeded', value: undefined })),
+    ).resolves.toMatchObject({ status: 'confirmed', value: undefined });
+    await expect(
+      withCapacityReservation(ledger, request, async () => ({ status: 'failed', error: undefined })),
+    ).resolves.toMatchObject({ status: 'released_after_failure', error: undefined });
+  });
+});
+
+describe('withCapacityReservation — error text built from adapter strings is safe', () => {
+  const request = { key: 'user-1', limit: 1, operationId: 'op-1' };
+
+  function statusError(status: unknown): Promise<Error> {
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async () => ({ status } as never),
+      confirmReservation: async () => undefined,
+      releaseReservation: async () => undefined,
+    };
+    return withCapacityReservation(ledger, request, okWork).then(
+      () => {
+        throw new Error('expected a rejection');
+      },
+      (caught: unknown) => caught as Error,
+    );
+  }
+
+  it('escapes control, line-break and bidi characters in an unknown status', async () => {
+    const error = await statusError('evil\n\u001b[31m\u202e\u2066');
+    expect(error).toBeInstanceOf(RangeError);
+    expect(error.message).toMatch(/unknown reservation decision status/);
+    expect(error.message).not.toMatch(hostileText);
+  });
+
+  it.each([
+    ['a symbol', Symbol('x')],
+    ['a bigint', 5n],
+    ['a null-prototype object', Object.create(null) as object],
+    [
+      'an object with a throwing toString',
+      {
+        toString(): string {
+          throw new TypeError('boom');
+        },
+      },
+    ],
+  ])('still raises the documented RangeError for %s as the status', async (_label, status) => {
+    const error = await statusError(status);
+    expect(error).toBeInstanceOf(RangeError);
+    expect(error.message).toMatch(/unknown reservation decision status/);
+  });
+});
+
+describe('withReserveConfirm — a rejected commit is detected by presence, not truthiness (CGK-003)', () => {
+  const falsyRejections: ReadonlyArray<readonly [string, unknown]> = [
+    ['undefined', undefined],
+    ['null', null],
+    ['false', false],
+    ['zero', 0],
+    ['an empty string', ''],
+  ];
+
+  it.each(falsyRejections)('keeps the paid result and an own commitError when commitUsage rejects with %s', async (_label, rejection) => {
+    let paidCalls = 0;
+    const ledger: UsageLedger = {
+      checkUnderLimit: async () => true,
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- a falsy rejection is the case under test
+      commitUsage: () => Promise.reject(rejection),
+    };
+    const result = await withReserveConfirm(ledger, 'user', 5, async () => {
+      paidCalls++;
+      return 'paid-result';
+    });
+    expect(paidCalls).toBe(1);
+    expect(result).toMatchObject({ allowed: true, result: 'paid-result' });
+    expect(Object.hasOwn(result, 'commitError')).toBe(true);
+    expect((result as { commitError?: unknown }).commitError).toBe(rejection);
+    // Why the docs test presence: a truthiness test misses every one of these.
+    expect(Boolean((result as { commitError?: unknown }).commitError)).toBe(false);
+  });
+
+  it('has no own commitError after a clean commit', async () => {
+    const ledger = new FakeLedger();
+    const result = await withReserveConfirm(ledger, 'user', 5, async () => 'paid-result');
+    expect(result).toEqual({ allowed: true, result: 'paid-result' });
+    expect(Object.hasOwn(result, 'commitError')).toBe(false);
+  });
+
+  it('treats a commitUsage that resolves a value as recorded (only a rejection signals failure)', async () => {
+    const ledger: UsageLedger = {
+      checkUnderLimit: async () => true,
+      commitUsage: (() => Promise.resolve({ committed: false })) as unknown as UsageLedger['commitUsage'],
+    };
+    const result = await withReserveConfirm(ledger, 'user', 5, async () => 'paid-result');
+    expect(Object.hasOwn(result, 'commitError')).toBe(false);
+  });
+});
