@@ -152,7 +152,9 @@ export interface UsageTokens {
  * @throws TypeError if `rates` or `usage` is not a plain or null-prototype
  *   object (`null`, `undefined`, a primitive, an array, a `Map`, `Set`,
  *   `Date`, `RegExp` or class instance), a rate is not a number, an unknown
- *   usage key is present, or a token count is not a number.
+ *   usage key is present (any own key that is not one of the five bucket names:
+ *   string or symbol, enumerable or not), or a token count is not a number.
+ *   A known bucket is read and validated whether or not it is enumerable.
  * @throws RangeError if a rate or token count is negative, non-finite (`NaN`
  *   or `Infinity`), or not a safe integer (token counts only). Error messages
  *   name the field but never echo the rejected value; an unknown usage key is
@@ -183,8 +185,16 @@ export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
     );
   }
   // An unrecognized key (a provider's snake_case field, a typo) would
-  // otherwise be ignored and its tokens priced at $0.
-  for (const key of Object.keys(usage)) {
+  // otherwise be ignored and its tokens priced at $0. Every own key counts,
+  // enumerable or not and string or symbol, so a field cannot hide from this
+  // check. A known field that is not enumerable is still read below.
+  for (const key of Reflect.ownKeys(usage)) {
+    if (typeof key === 'symbol') {
+      throw new TypeError(
+        'estimateCostUsd: usage has an unknown symbol-keyed field; ' +
+          `expected only ${USAGE_FIELDS.join(', ')}`,
+      );
+    }
     if (!USAGE_FIELDS.includes(key as keyof UsageTokens)) {
       throw new TypeError(
         `estimateCostUsd: usage has unknown field ${describe(key)}; ` +

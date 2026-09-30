@@ -1175,6 +1175,111 @@ describe('withCapacityReservation — the request must be a plain record', () =>
   });
 });
 
+describe('withCapacityReservation — the work callback cannot change which hold is confirmed', () => {
+  const request = { key: 'user-1', limit: 1, operationId: 'op-1' };
+  const issue = (): CapacityReservation => ({ id: 'r-1', key: 'user-1', operationId: 'op-1', expiresAt: futureIso() });
+  const recording = (issued: CapacityReservation) => {
+    const confirmed: CapacityReservation[] = [];
+    const released: CapacityReservation[] = [];
+    const ledger: CapacityReservationLedger = {
+      reserveCapacity: async () => ({ status: 'acquired', reservation: issued }),
+      confirmReservation: async (held) => {
+        confirmed.push({ ...held });
+      },
+      releaseReservation: async (held) => {
+        released.push({ ...held });
+      },
+    };
+    return { ledger, confirmed, released };
+  };
+
+  it('hands the callback a frozen copy, not the object that is later confirmed', async () => {
+    const { ledger, confirmed } = recording(issue());
+    let received: CapacityReservation | undefined;
+    const result = await withCapacityReservation(ledger, request, async (reservation) => {
+      received = reservation;
+      return { status: 'succeeded', value: 'paid' };
+    });
+    expect(received).toMatchObject({ id: 'r-1', key: 'user-1', operationId: 'op-1' });
+    expect(Object.isFrozen(received)).toBe(true);
+    expect(result.status).toBe('confirmed');
+    if (result.status === 'confirmed') expect(result.reservation).not.toBe(received);
+    expect(confirmed.map((held) => held.id)).toEqual(['r-1']);
+  });
+
+  it('confirms the original id when the callback tries to change the reservation it was given', async () => {
+    const { ledger, confirmed } = recording(issue());
+    const result = await withCapacityReservation(ledger, request, async (reservation) => {
+      try {
+        (reservation as { id: string }).id = 'someone-elses-hold';
+      } catch {
+        // A frozen object throws in strict mode; the hold is what matters here.
+      }
+      return { status: 'succeeded', value: 'paid' };
+    });
+    expect(result.status).toBe('confirmed');
+    expect(confirmed.map((held) => held.id)).toEqual(['r-1']);
+  });
+
+  it('treats a callback that throws on its frozen copy as an ambiguous outcome and confirms nothing', async () => {
+    const { ledger, confirmed, released } = recording(issue());
+    const result = await withCapacityReservation(ledger, request, async (reservation) => {
+      (reservation as { id: string }).id = 'someone-elses-hold';
+      return { status: 'succeeded', value: 'paid' };
+    });
+    expect(result.status).toBe('work_outcome_ambiguous');
+    expect(confirmed).toEqual([]);
+    expect(released).toEqual([]);
+  });
+
+  it('confirms and releases the snapshot taken at acquire time, not later edits to the adapter\'s own object', async () => {
+    for (const outcome of ['succeeded', 'failed'] as const) {
+      const issued = issue();
+      const { ledger, confirmed, released } = recording(issued);
+      await withCapacityReservation(ledger, request, async () => {
+        issued.id = 'edited-after-acquire';
+        return outcome === 'succeeded'
+          ? { status: 'succeeded', value: 'paid' }
+          : { status: 'failed', error: new Error('no') };
+      });
+      expect((outcome === 'succeeded' ? confirmed : released).map((held) => held.id)).toEqual(['r-1']);
+    }
+  });
+
+  it('still reads required fields that are inherited or non-enumerable, once each', async () => {
+    let idReads = 0;
+    class Held {
+      readonly key = 'user-1';
+      get id(): string {
+        idReads += 1;
+        return 'r-1';
+      }
+      get expiresAt(): string {
+        return futureIso();
+      }
+    }
+    const held = new Held();
+    Object.defineProperty(held, 'operationId', { value: 'op-1', enumerable: false });
+    const { ledger, confirmed } = recording(held as unknown as CapacityReservation);
+    let received: CapacityReservation | undefined;
+    const result = await withCapacityReservation(ledger, request, async (reservation) => {
+      received = reservation;
+      return { status: 'succeeded', value: 'paid' };
+    });
+    expect(result.status).toBe('confirmed');
+    expect(idReads).toBe(1);
+    expect(received).toMatchObject({ id: 'r-1', key: 'user-1', operationId: 'op-1' });
+    expect(confirmed[0]).toMatchObject({ id: 'r-1', operationId: 'op-1' });
+  });
+
+  it('keeps the adapter\'s extra fields on the snapshot it passes back', async () => {
+    const issued = { ...issue(), fencingToken: 42 } as CapacityReservation;
+    const { ledger, confirmed } = recording(issued);
+    await withCapacityReservation(ledger, request, okWork);
+    expect(confirmed[0]).toMatchObject({ id: 'r-1', fencingToken: 42 });
+  });
+});
+
 describe('withCapacityReservation — the adapter decision and reservation are read once', () => {
   it('reads decision.status, decision.reservation and each reservation field once', async () => {
     const reads: Record<string, number> = {};

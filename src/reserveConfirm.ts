@@ -162,7 +162,19 @@ export type ReserveConfirmResult<T> =
 // Strict capacity reservation
 // ---------------------------------------------------------------------------
 
-/** One adapter-issued hold on capacity. Pass it back unchanged to the adapter. */
+/**
+ * One adapter-issued hold on capacity. Pass it back unchanged to the adapter.
+ *
+ * {@link withCapacityReservation} copies the reservation your adapter returns
+ * once (own enumerable fields, plus `id`, `key`, `operationId` and
+ * `expiresAt` wherever they are defined) into a snapshot. `doTheWork` receives
+ * a frozen shallow copy of that snapshot, so it can read the reservation but
+ * not change it: an assignment throws in strict mode (which makes the outcome
+ * `work_outcome_ambiguous` if it escapes the callback), and nothing it does
+ * changes the snapshot that is confirmed or released. The snapshot is also
+ * what the result's `reservation` field holds. Editing your own object after
+ * you return it does not change the hold either.
+ */
 export interface CapacityReservation {
   /** Adapter-chosen id; must be a non-blank string (not empty, not only whitespace or invisible characters). */
   id: string;
@@ -292,6 +304,10 @@ export type CapacityReservationResult<T> =
  *   if the adapter did create a hold, it is left in place (not released).
  * - Each field of the decision, the reservation and the work outcome is read
  *   once.
+ * - The reservation is copied once into a snapshot. `doTheWork` gets a frozen
+ *   shallow copy of it (see {@link CapacityReservation}), and the snapshot is
+ *   what `confirmReservation` or `releaseReservation` receives and what the
+ *   result returns, so the callback cannot change which hold is confirmed.
  * - `{ status: 'succeeded' }` leads to one `confirmReservation` call;
  *   `{ status: 'failed' }` to one `releaseReservation` call. It never calls
  *   both, never calls either twice, and never retries.
@@ -336,8 +352,7 @@ export async function withCapacityReservation<T>(
     return { status: "denied", reason };
   }
   if (status === "operation_in_progress") {
-    const reservation = decisionRecord.reservation as CapacityReservation;
-    validateReservationIdentity(reservation, key, operationId, false);
+    const reservation = readReservation(decisionRecord.reservation, key, operationId, false);
     return { status: "operation_in_progress", reservation };
   }
   if (status === "operation_terminal") {
@@ -352,11 +367,12 @@ export async function withCapacityReservation<T>(
     throw new RangeError(`withCapacityReservation: adapter returned unknown reservation decision status ${describe(status)}`);
   }
 
-  const reservation = decisionRecord.reservation as CapacityReservation;
-  validateReservationIdentity(reservation, key, operationId);
+  const reservation = readReservation(decisionRecord.reservation, key, operationId);
   let outcome: unknown;
   try {
-    outcome = await doTheWork(reservation);
+    // The callback gets a frozen copy, so nothing it does can change the
+    // snapshot that is confirmed or released below.
+    outcome = await doTheWork(Object.freeze({ ...reservation }));
   } catch (error) {
     return { status: "work_outcome_ambiguous", reservation, error };
   }
@@ -419,19 +435,26 @@ function readReserveCapacityRequest(request: ReserveCapacityRequest): ReserveCap
   return { key, limit, operationId };
 }
 
-function validateReservationIdentity(
-  reservation: CapacityReservation,
+function readReservation(
+  candidate: unknown,
   requestKey: string,
   requestOperationId: string,
   requireUnexpired = true,
-): void {
-  if (!reservation || typeof reservation !== "object") {
+): CapacityReservation {
+  if (!candidate || typeof candidate !== "object") {
     throw new TypeError("withCapacityReservation: adapter returned an invalid reservation");
   }
-  const id: unknown = reservation.id;
-  const key: unknown = reservation.key;
-  const operationId: unknown = reservation.operationId;
-  const expiresAt: unknown = reservation.expiresAt;
+  const reservation = candidate as Record<string, unknown>;
+  // One read of every own enumerable field (the spread), so the adapter's
+  // extra fields survive and each getter runs once. A required field that is
+  // not an own enumerable property (an inherited or non-enumerable accessor)
+  // is read directly, once.
+  const copy: Record<string, unknown> = { ...reservation };
+  const field = (name: string): unknown => (Object.hasOwn(copy, name) ? copy[name] : reservation[name]);
+  const id: unknown = field("id");
+  const key: unknown = field("key");
+  const operationId: unknown = field("operationId");
+  const expiresAt: unknown = field("expiresAt");
   if (typeof id !== "string") {
     throw new TypeError("withCapacityReservation: reservation id must be a non-empty string");
   }
@@ -454,6 +477,7 @@ function validateReservationIdentity(
   if (requireUnexpired && expiresAtMs <= Date.now()) {
     throw new RangeError("withCapacityReservation: adapter returned an expired reservation");
   }
+  return { ...copy, id, key, operationId, expiresAt };
 }
 
 /** Read a work outcome once. Returns `undefined` for anything that is not a well-formed outcome. */

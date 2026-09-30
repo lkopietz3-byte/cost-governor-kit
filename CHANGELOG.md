@@ -25,10 +25,24 @@ rounding regression value (for example `0.0195`, `103641.217812`,
 - **`getRatesOrThrow` needs a string model.** A `String` object, an array, or an
   object with a `toString` used to be coerced into a key (`['a']` matched `a`).
   It is now a `TypeError`.
-- **Blank ids are rejected.** A `key`, `operationId` or reservation `id` made
-  only of whitespace and invisible characters (zero-width space, bidi controls,
-  soft hyphen, variation selectors, Hangul fillers) used to pass a `trim()`
-  check. It now throws a `RangeError` like an empty string.
+- **`withCapacityReservation` rejects blank ids.** A `key`, `operationId` or
+  reservation `id` made only of whitespace and invisible characters
+  (zero-width space, bidi controls, soft hyphen, variation selectors, Hangul
+  fillers) used to pass a `trim()` check. It now throws a `RangeError` like an
+  empty string. `withReserveConfirm` does not validate `key` or `limit`: it
+  passes both to your ledger as given, so a blank key is for your ledger to
+  reject.
+- **`withCapacityReservation` confirms and releases its own snapshot.** The
+  reservation your adapter returns is copied once. `doTheWork` receives a
+  frozen shallow copy, and the snapshot is what `confirmReservation` or
+  `releaseReservation` gets and what the result's `reservation` holds. Before,
+  the callback received the very object that was confirmed later, so it could
+  change the `id` being confirmed (or your adapter could edit its own object
+  while the work ran). Assigning to the frozen copy throws in strict mode, so an
+  uncaught assignment makes the outcome `work_outcome_ambiguous` and nothing is
+  confirmed. Extra fields your adapter puts on the reservation are kept on the
+  snapshot, and `id`, `key`, `operationId` and `expiresAt` are still read once
+  even when they are inherited or non-enumerable.
 - **`withCapacityReservation` reads its input once.** It validates a copy of the
   request and hands the adapter a fresh `{ key, limit, operationId }` object,
   not your object, so an adapter or a caller that changes the request while the
@@ -54,6 +68,15 @@ rounding regression value (for example `0.0195`, `103641.217812`,
 
 ### Fixed
 
+- **Unknown usage fields cannot hide.** `estimateCostUsd`, and
+  `checkPreCallCeiling` through it, inspects every own key of `usage`
+  (`Reflect.ownKeys`). Before, only enumerable string keys were checked, so a
+  non-enumerable `input_tokens` or a symbol-keyed field was skipped and its
+  tokens priced at $0, and the README's "any unknown key throws" was false.
+  Now an unknown string key throws `unknown field "..."`, and an unknown
+  symbol key throws `unknown symbol-keyed field` (without echoing the symbol).
+  A known bucket that is not enumerable is still read and validated; that is
+  the documented choice, and it is tested.
 - **CGK-002:** the commented `supabaseUsageLedger` example in
   `reference-impl/supabase-usage-ledger.sql` logged a warning and resolved when
   the RPC returned `committed: false`, so `withReserveConfirm` reported the call
@@ -78,7 +101,7 @@ rounding regression value (for example `0.0195`, `103641.217812`,
   `v*` tag that matches `package.json` (for both triggers), runs the dependency
   audit, `npm run verify` and `npm run attw`, and treats only a confirmed
   registry `E404` as "not published".
-- Tests: 437 pass and 1 skips without `COST_GOVERNOR_PG_URL` (0.1.0 had 204 and
+- Tests: 446 pass and 1 skips without `COST_GOVERNOR_PG_URL` (0.1.0 had 204 and
   1). They now cover the adapter-returned reservation and outcome shapes, a
   `null` `rates`, the exact-millisecond expiry boundary, the extracted SQL
   adapter running through `withReserveConfirm` on PGlite, and the five falsy
