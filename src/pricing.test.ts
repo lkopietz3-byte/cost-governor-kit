@@ -11,6 +11,7 @@ import {
   type PricingTable,
   type UsageTokens,
 } from './pricing.js';
+import { checkPreCallCeiling } from './preCallCeiling.js';
 
 // Toy rates — deliberately round numbers so expected costs are easy to hand-check.
 const rates: ModelRates = { inputPerMillion: 3, outputPerMillion: 15 };
@@ -179,6 +180,45 @@ describe('estimateCostUsd — validates its public numeric inputs', () => {
     const mixed = { inputTokens: 10, model: 'toy-model-a' };
     expect(() => estimateCostUsd(rates, mixed as unknown as UsageTokens)).toThrow(/unknown field "model"/);
     expect(() => estimateCostUsd(rates, mixed as unknown as UsageTokens)).toThrow(TypeError);
+  });
+
+  it('rejects an unknown key that is not enumerable, so it cannot hide from the check', () => {
+    // The reviewer's probe: a non-enumerable input_tokens of 5M priced as $0.000015.
+    const hidden = { outputTokens: 1 };
+    Object.defineProperty(hidden, 'input_tokens', { value: 5_000_000, enumerable: false });
+    expect(() => estimateCostUsd(rates, hidden as unknown as UsageTokens)).toThrow(/unknown field "input_tokens"/);
+    expect(() => estimateCostUsd(rates, hidden as unknown as UsageTokens)).toThrow(TypeError);
+    expect(() =>
+      checkPreCallCeiling({
+        spentSoFarUsd: 0,
+        ceilingUsd: 0.0001,
+        rates,
+        estimatedNextCallUsage: hidden,
+      }),
+    ).toThrow(/unknown field "input_tokens"/);
+  });
+
+  it('rejects an unknown symbol-keyed field without echoing the symbol', () => {
+    const tagged = { outputTokens: 1, [Symbol('input_tokens')]: 5_000_000 };
+    expect(() => estimateCostUsd(rates, tagged as unknown as UsageTokens)).toThrow(TypeError);
+    expect(() => estimateCostUsd(rates, tagged as unknown as UsageTokens)).toThrow(
+      /usage has an unknown symbol-keyed field; expected only inputTokens/,
+    );
+    expect(() => estimateCostUsd(rates, tagged as unknown as UsageTokens)).not.toThrow(/Symbol\(/);
+    const hiddenSymbol = { outputTokens: 1 };
+    Object.defineProperty(hiddenSymbol, Symbol.for('x'), { value: 1, enumerable: false });
+    expect(() => estimateCostUsd(rates, hiddenSymbol as unknown as UsageTokens)).toThrow(/symbol-keyed field/);
+  });
+
+  it('reads a known bucket that is not enumerable, and still validates its value', () => {
+    // Documented choice: a known field is read whether or not it is enumerable.
+    const hiddenKnown = {};
+    Object.defineProperty(hiddenKnown, 'inputTokens', { value: 1_000_000, enumerable: false });
+    Object.defineProperty(hiddenKnown, 'outputTokens', { value: 1_000_000, enumerable: false });
+    expect(estimateCostUsd(rates, hiddenKnown as UsageTokens)).toBe(18);
+    const hiddenBad = {};
+    Object.defineProperty(hiddenBad, 'inputTokens', { value: -1, enumerable: false });
+    expect(() => estimateCostUsd(rates, hiddenBad as UsageTokens)).toThrow(RangeError);
   });
 
   it.each([
