@@ -136,9 +136,14 @@ supply it, otherwise `inRate x 0.1`.
   count (`null`, fractional, negative, NaN, Infinity, beyond
   `Number.MAX_SAFE_INTEGER`), **any unknown key**, or a non-finite result.
   Messages name the field but not the rejected value (an unknown key is echoed,
-  escaped).
+  escaped; a symbol key is reported as "an unknown symbol-keyed field" without
+  its description).
 
 Unknown keys throw so that a provider payload passed as-is is not priced at $0.
+"Unknown" means any own key that is not one of the five bucket names: string or
+symbol, enumerable or not. A known bucket is read and validated whether or not
+it is enumerable, so `Object.defineProperty(usage, 'inputTokens', { value: 5,
+enumerable: false })` prices 5 input tokens.
 Map an Anthropic `usage` block like this (`input_tokens` is the uncached
 remainder; `cache_creation_input_tokens` is the total of the two TTL buckets, so
 don't add it separately):
@@ -347,6 +352,10 @@ concurrent requests at limit 3 all run.
   adapter did create a hold, the helper leaves it in place (it does not release
   a hold it cannot trust), and with a conforming adapter a retry with the same
   `operationId` then gets `operation_in_progress`.
+- `doTheWork` receives a frozen shallow copy of the reservation. It can read
+  `id`, `key`, `operationId` and `expiresAt`; assigning to the copy throws in
+  strict mode (so, if uncaught, the outcome is `work_outcome_ambiguous`), and
+  nothing it does changes which hold is confirmed or released.
 - `{ status: 'succeeded', value }` leads to exactly one `confirmReservation`
   call; `{ status: 'failed', error }` to exactly one `releaseReservation` call.
   It never calls both, never calls either twice, and never retries.
@@ -473,8 +482,11 @@ behavior under a network partition or Postgres failover.
   `commitUsage` resolves, so only a rejection reports an unrecorded commit.
 - **Copies are shallow and only for the records this kit reads.** Each field of
   your rates, usage, check and request is read once, but nothing is deep-cloned
-  or frozen, and the reservation object your adapter returns is handed back to
-  it as is.
+  or frozen. The one exception is the reservation your adapter returns: it is
+  copied once into a snapshot, `doTheWork` receives a frozen shallow copy, and
+  the snapshot is what `confirmReservation` or `releaseReservation` gets and
+  what the result returns, so the callback cannot change which hold is
+  confirmed.
 - **The SQL adapter example is a sketch.** Its tests run it through a stub of
   the Supabase client on a single PGlite connection. It was not run with
   `@supabase/supabase-js`, against a live Supabase project, or under concurrent
