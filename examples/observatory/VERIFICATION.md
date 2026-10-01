@@ -6,7 +6,8 @@ The prepared SDK manifest identifies cost-governor-kit 0.2.0 at source revision
 `e8601b90950938d7d8a6dab31b8860dc557ac1e9`. This branch does not change the SDK
 source, public API or runtime dependencies. The example uses synthetic requests,
 illustrative rates and a sequential memory ledger; the canvas replays the captured
-journal. Source-correspondence and behavioral checks are part of `npm run verify`.
+journal. Source-correspondence and behavioral checks run with `npm run verify:observatory`,
+which CI runs as its own step; they are not part of the package release gate.
 
 ## Current verification
 
@@ -22,7 +23,7 @@ viewports plus a held-out viewport, a 39/50 visual critique and a silent WebM
 showcase. The cited `evidence/critic/current` and `demo/critic/current` directories
 are absent from this repository. Those reports are historical and unavailable
 here; they are not current verification of this checkout. The separate measurer
-baseline under an author's local `prompt-forge` path is also not included.
+baseline used during development is also not included.
 
 ## Unknown and bounded claims
 
@@ -35,6 +36,6 @@ playback, not measured SDK latency or a frame-rate guarantee.
 Desktop browser emulation does not establish physical-phone or cross-browser
 behavior. Complete contrast, assistive-technology and performance audits, user
 acceptance and creative/business outcomes are Unknown unless separately tested.
-Live Jev/MCP adapters, actual provider billing, production concurrency, durable
+Live tool/MCP adapters, actual provider billing, production concurrency, durable
 ledgers, account sync, demand and revenue remain Unknown. The presentation hook
 moves through the existing journal; it does not execute work or settle uncertainty.

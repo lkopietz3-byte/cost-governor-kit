@@ -1,6 +1,6 @@
 import { validateSettings } from './session.mjs';
 
-export const NOTEBOOK_KEY = 'planrlabs.threshold.notebook.v1';
+export const NOTEBOOK_KEY = 'cost-governor-kit.threshold.notebook.v1';
 export const NOTEBOOK_LIMIT = 12;
 const SCHEMA = 'threshold-notebook-v1';
 const MAX_TEXT = 24_000;

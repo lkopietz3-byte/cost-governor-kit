@@ -86,7 +86,7 @@
     "lint": "eslint . --max-warnings=0",
     "audit:dependencies": "npm audit --package-lock-only --include=dev --ignore-scripts --audit-level=low",
     "prepare": "npm run build",
-    "verify": "npm run lint && npm run typecheck && npm test && npm run build && npm run verify:package && npm run verify:observatory",
+    "verify": "npm run lint && npm run typecheck && npm test && npm run build && npm run verify:package",
     "prepublishOnly": "npm run verify",
     "verify:observatory": "node examples/observatory/tools/verify-source.mjs --source . && node --test examples/observatory/tests/session.check.mjs examples/observatory/tests/insights.check.mjs examples/observatory/tests/notebook.check.mjs"
   },

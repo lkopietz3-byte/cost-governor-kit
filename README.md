@@ -54,7 +54,7 @@ compatibility testing, not a recommendation. `engines` in `package.json` is
 
 ## Visual example: Threshold
 
-The repository includes a PlanrLabs visual instrument in
+The repository includes a visual example in
 [`examples/observatory`](examples/observatory/README.md). Run bounded synthetic
 requests through the actual SDK, inspect the cost/capacity decisions, and replay
 the recorded journal for a walkthrough. It uses an educational memory adapter;
@@ -67,8 +67,9 @@ node examples/observatory/tools/serve.mjs
 
 Prepared browser modules are pinned to the source manifest. After changing SDK
 source, run `node examples/observatory/tools/vendor-sdk.mjs` before verification.
-`npm run verify` includes the example's source-correspondence and behavioral
-checks. The example adds no runtime dependency and is outside the npm files
+`npm run verify:observatory` runs the example's source-correspondence and
+behavioral checks; CI runs it as its own step, and it is not part of the
+package release gate (`npm run verify`). The example adds no runtime dependency and is outside the npm files
 allowlist. Full local setup and rendered-verification instructions are in its
 README.
 

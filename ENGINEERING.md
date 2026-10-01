@@ -192,8 +192,10 @@ atomicity, persistence, provider billing or reconciliation guarantee. The UI
 labels recorded playback and known estimates, preserving uncertain outcomes.
 The SDK public API and zero-runtime-dependency contract are unchanged.
 
-`npm run verify` also runs `verify:observatory`: validate the prepared module
-hashes against the current source and run the example's Node behavioral checks.
+CI runs `npm run verify:observatory` as its own step: validate the prepared
+module hashes against the current source and run the example's Node behavioral
+checks. It is deliberately not part of `npm run verify` or `prepublishOnly`, so
+the example can never block a release of the library.
 After a source change, regenerate with `node examples/observatory/tools/vendor-sdk.mjs`.
 The additional checks use `*.check.mjs`, so the Node runner stays distinct from
 Vitest. Browser checks are an explicit local harness described in the example

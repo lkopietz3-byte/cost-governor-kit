@@ -33,7 +33,7 @@ const report = {
   },
   source: {}, checks: [], screenshots: [], pageErrors: [],
   limits: [
-    'Synthetic sequential memory adapter; no provider, Jev, MCP, production concurrency, durable ledger or billing evidence.',
+    'Synthetic sequential memory adapter; no provider, live tool, MCP, production concurrency, durable ledger or billing evidence.',
     'Desktop Chrome with phone-width emulation; not a physical phone, assistive-technology audit or cross-browser certification.',
   ],
 };
@@ -301,7 +301,7 @@ try {
     assert.equal(await page.locator('#pricing-lens').isVisible(), true);
     assert.equal(await page.locator('#token-buckets [data-bucket]').count(), 5);
     assert.equal(await page.locator('#token-buckets [data-bucket="cacheReadTokens"] b').textContent(), '10,000 tokens');
-    assert.match(await page.locator('.drawer-source').textContent(), /Jev and MCP workers are not connected/);
+    assert.match(await page.locator('.drawer-source').textContent(), /Live tool and MCP workers are not connected/);
     assert.match(await page.locator('.drawer-source').textContent(), /playback speed is presentation timing/);
     await shot(page, 'desktop-cache-inspector.png');
     await page.locator('#inspector').evaluate(element => element.close());
@@ -383,7 +383,7 @@ try {
     assert.equal(await page.evaluate(() => document.activeElement.id), 'about');
   });
 
-  const notebookKey = 'planrlabs.threshold.notebook.v1';
+  const notebookKey = 'cost-governor-kit.threshold.notebook.v1';
   const seeded = {
     schema: 'threshold-notebook-v1', revision: 4,
     setups: [{

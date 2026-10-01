@@ -44,6 +44,8 @@ jobs:
         run: npm run attw
       - name: Verify the installable package
         run: npm run verify:package
+      - name: Check the observatory example
+        run: npm run verify:observatory
 
   compat:
     name: Consumer compatibility (Node ${{ matrix.node }})

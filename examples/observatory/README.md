@@ -1,6 +1,6 @@
-# Threshold / PlanrLabs
+# Threshold
 
-Watch a request find its way. Threshold makes Lucas's Cost Governor SDK visible through a clean decision canvas: packets travel along the recorded path, visited stages illuminate, capacity fills, and outcomes branch into confirmed, stopped, released or unresolved work.
+Watch a request find its way. Threshold makes the cost-governor-kit SDK visible through a clean decision canvas: packets travel along the recorded path, visited stages illuminate, capacity fills, and outcomes branch into confirmed, stopped, released or unresolved work.
 
 ## Open the canvas
 
@@ -35,23 +35,23 @@ The example calls the real `estimateCostUsd`, `checkPreCallCeiling` and `withCap
 
 Only newly acquired holds invoke work. Definite no-work failures release a hold. Ambiguous work or failed confirmation retains it. Known successful usage remains in estimated spend even if confirmation fails; ambiguous usage stays explicitly unknown. Duplicate active and terminal IDs do not start a second callback. The drawer separates input, output, cache reads and both cache-write buckets using the example's illustrative rates (the SDK supplies no price table; cache reads default to a fixed 0.1x input-rate ratio unless `cacheReadPerMillion` overrides it).
 
-The canvas replays a completed local journal. Jev and MCP execution streams are not connected. Production atomicity, durable storage, actual provider prices/billing, expiry/fencing and reconciliation need their actual adapters and checks. Threshold does not establish a strict production limit.
+The canvas replays a completed local journal. Live tool and MCP execution streams are not connected. Production atomicity, durable storage, actual provider prices/billing, expiry/fencing and reconciliation need their actual adapters and checks. Threshold does not establish a strict production limit.
 
 ## Reuse the motion layer
 
 `lib/flow-map.mjs` has no external runtime dependency. `createFlowMap(host, { onSelect })` returns `render` and `destroy`. Its render input is `{session, cursor, playing, selectedStage, reducedMotion, animate}`. It uses only events through the cursor, highlights the current attempt's visited stages, reads occupancy from that snapshot, and moves a comet along the same SVG paths that illuminate. Paused or reduced-motion views are static. Refusal follows the observed bypass; it never fabricates a visit to Work.
 
-`app.mjs` owns controls, playback, tabs, comparison, native conditions/result/details dialogs and notebook. `viewport.css` defines the single-screen layout and an upper-left key with consistent contact shadows. Long evidence and saved lists scroll inside named panels; the root page stays within the four reference viewports. Short or enlarged-text viewports keep normal reflow instead of clipping. `lib/session.mjs` owns the bounded actual SDK experiment. `lib/insights.mjs` owns complete-run explanations and compatible comparisons. `lib/notebook.mjs` owns stored conditions. This separation lets a future tool adapter supply actual events while keeping execution and presentation distinct. Do not create a synthetic trace and label it live Jev/MCP.
+`app.mjs` owns controls, playback, tabs, comparison, native conditions/result/details dialogs and notebook. `viewport.css` defines the single-screen layout and an upper-left key with consistent contact shadows. Long evidence and saved lists scroll inside named panels; the root page stays within the four reference viewports. Short or enlarged-text viewports keep normal reflow instead of clipping. `lib/session.mjs` owns the bounded actual SDK experiment. `lib/insights.mjs` owns complete-run explanations and compatible comparisons. `lib/notebook.mjs` owns stored conditions. This separation lets a future tool adapter supply actual events while keeping execution and presentation distinct. Do not create a synthetic trace and label it live tool or MCP output.
 
 ## Notebook recovery
 
-The existing key remains `planrlabs.threshold.notebook.v1`. Its schema stores only validated conditions, a bounded name, ID and save time; no run journal, credential or provider data. Browser Web Locks coordinate a fresh read/merge/write/recheck between Threshold tabs. A thirteenth setup refuses a write, rather than evicting an existing recipe. A storage notification updates the list without replacing typed controls or results.
+Setups are stored under the key `cost-governor-kit.threshold.notebook.v1`. Its schema stores only validated conditions, a bounded name, ID and save time; no run journal, credential or provider data. Browser Web Locks coordinate a fresh read/merge/write/recheck between Threshold tabs. A thirteenth setup refuses a write, rather than evicting an existing recipe. A storage notification updates the list without replacing typed controls or results.
 
 Malformed/future data, invalid settings/dates, repeated IDs and unknown fields block writes and preserve the raw value. **Backup notebook** keeps it exactly. Repair that origin's specific entry from its backup; the page does not clear or migrate unknown data. Quota/storage errors report failure. Browsers without Web Locks can read existing setups and run experiments, but notebook writes remain disabled. Removing a recipe refuses a stale removal if another writer changed that record. Browser clearing, eviction and unrelated writers outside the lock remain limitations. This is local convenience storage, not account sync or durable evidence.
 
 ## Verify or capture
 
-From the owning repository, the required gate is `npm run verify`. Change into `examples/observatory` for the focused commands below:
+From the owning repository, run `npm run verify:observatory` (CI runs it as its own step; it is not part of the package's `npm run verify` release gate). Change into `examples/observatory` for the focused commands below:
 
 ```sh
 node tools/verify-source.mjs --source /absolute/cost-governor-kit
@@ -63,14 +63,10 @@ node tools/capture-showcase.mjs --out /absolute/new-capture-folder --scenario ba
 
 The browser tools reuse existing Playwright and Chrome. Captures record the rendered page and journal alongside selected local file hashes; the capture and browser harnesses do not verify that served bytes match those local files. Use `measure-render.mjs` for its separate served-source comparison, and keep every receipt scoped to the files and state it actually checks. See `VERIFICATION.md` for available evidence and limits. Earlier receipts and movies remain historical evidence of their own source.
 
-Code and original UI: Lucas Kopietz / PlanrLabs, MIT. The SDK license is preserved. Typography uses system fonts; no remote fonts, third-party art, analytics or secrets are embedded.
+Code and original UI: Lucas Kopietz, MIT. The SDK license is preserved. Typography uses system fonts; no remote fonts, third-party art, analytics or secrets are embedded.
 
 ## Reproducible presentation clock
 
 `window.__threshold.state()` returns a frozen, detached snapshot of the visible recorded prefix: cursor, event, known counts, source identity and explicit recorded/synthetic flags. `step(n)` pauses and seeks to an existing journal step; `advance(seconds)` advances a controlled presentation clock at the chosen replay speed. These methods never run the SDK, edit conditions or write the notebook. They reject invalid time/step inputs. A hook on an idle page remains idle until the user runs the real experiment.
 
 An external measurer used during development is not included in this repository. Its historical baseline is useful for comparison, but its contrast estimates do not model gradients, alpha composition or occlusion, and its initial stepped frames do not start a run. The current rendered checks pair deterministic geometry with separate visual critique. Neither a critic score nor a screenshot is proof of real provider cost, performance or live execution.
-
-## Detailed creative direction
-
-`DIRECTOR-PROMPT.md` expands Claude's full production-prompt slots for this asset; `DESIGN-LOOP.md` records the bounded builder/measurer/critic/verifier process. `GUIDED-DIRECTOR.md` describes the proposed ordinary-chat → visual examples/questions → detailed production prompt → collaborative render/revision interface. That guided chat product is proposed, not implemented by this canvas.
