@@ -1,0 +1,213 @@
+/* The viewport is the workspace. Long evidence and saved lists have their own
+   named, keyboard-reachable panels; the diagram never moves below the fold. */
+body { min-height: 100svh; height: 100dvh; display: grid; grid-template-rows: 56px minmax(0, 1fr) 44px; }
+.header, main, footer { width: min(1600px, calc(100% - 48px)); }
+.header { height: 100%; }
+main { min-height: 0; height: 100%; display: grid; grid-template-rows: 64px 44px minmax(0, 1fr); gap: 10px; padding: 8px 0 10px; }
+.intro { padding: 0; align-items: center; }
+.intro h1 { font-size: clamp(24px, 2.5vw, 36px); letter-spacing: -1.1px; }
+.intro .eyebrow { margin-bottom: 5px; font-size: 9px; }
+.workspace-tabs { height: 44px; margin: 0; gap: 20px; }
+.workspace-tabs button { min-width: 44px; min-height: 44px; padding: 10px 6px; }
+.workspace { height: 100%; min-height: 0; grid-template-columns: 212px minmax(0, 1fr); gap: 22px; }
+.controls { min-height: 0; padding: 10px 0 0; overflow: auto; scrollbar-width: thin; }
+.control-heading { margin-bottom: 18px; }
+#experiment-form { flex: 0 0 auto; }
+.controls select { margin-top: 6px; }
+.scenario-note { min-height: 0; margin: 10px 0 16px; }
+.input-shell { height: 46px; padding: 0 8px; }
+.input-shell input { min-height: 44px; padding: 10px 0; }
+.control-bottom { padding-top: 0; }
+.legend { margin-top: 8px; padding-top: 12px; }
+#about { margin-top: 5px; }
+.draft-note { min-height: 0; margin: 10px 0 0; }
+.tiny { margin-bottom: 6px; }
+.primary, .secondary, .text-button, .icon-button, .detail-button,
+.play-button, .step-button, .variation, select, summary, footer a, .brand { min-height: 44px; min-width: 44px; }
+.icon-button, .play-button, .step-button { width: 44px; height: 44px; flex: 0 0 44px; }
+.text-button { padding: 10px 4px; }
+.primary, .secondary { padding: 10px 14px; }
+.canvas-panel { height: 100%; min-height: 0; display: grid; grid-template-rows: 68px minmax(0, 1fr) 94px 74px 38px; position: relative;
+  background: radial-gradient(ellipse 100% 100% at 0% 0%, rgb(191 241 207 / .095), transparent 68%), var(--bg);
+  box-shadow: inset 0 1px 0 rgb(229 236 230 / .15), 7px 10px 22px rgb(0 0 0 / .24); }
+.canvas-top { padding: 14px 24px 6px; }
+.canvas-title .eyebrow { color: var(--muted); }
+.metrics { gap: 22px; }
+.metrics span { font-size: 10px; }
+#flow-map, .flow-map, .flow-map--narrow { height: 100%; min-height: 0; }
+.flow-map { --flow-ink: var(--bg); --flow-cream: var(--ink); --flow-mint: var(--mint); --flow-coral: var(--coral); --flow-violet: var(--violet); --flow-amber: var(--amber); }
+.flow-map__backdrop { opacity: .55; mask-image: radial-gradient(ellipse at 15% 15%, #000, transparent 85%); }
+.flow-map__node { height: 100px; background: linear-gradient(145deg, #25332e, var(--surface) 60%, var(--bg)); border-color: rgb(163 177 169 / .3);
+  box-shadow: inset 1px 1px 0 rgb(229 236 230 / .15), inset -1px -1px 0 rgb(0 0 0 / .4), 3px 7px 5px rgb(0 0 0 / .38), 7px 16px 23px rgb(0 0 0 / .35); }
+.flow-map__node::after { opacity: .5; }
+.flow-map__node[data-state="current"], .flow-map__node[data-selected="true"] { border-color: var(--mint); background: linear-gradient(145deg, #344b3d, var(--surface2) 70%);
+  box-shadow: inset 1px 1px 0 rgb(191 241 207 / .5), 3px 7px 5px rgb(0 0 0 / .38), 8px 16px 23px rgb(0 0 0 / .35), 0 0 44px rgb(191 241 207 / .17); }
+.flow-map[data-stage="none"] .flow-map__node[data-flow-node="request"] { border-color: rgb(191 241 207 / .6); box-shadow: inset 1px 1px 0 rgb(191 241 207 / .35), 3px 7px 5px rgb(0 0 0 / .4), 7px 16px 23px rgb(0 0 0 / .35), 0 0 38px rgb(191 241 207 / .1); }
+.flow-map__branch { min-height: 54px; opacity: 1; color: var(--muted); background: linear-gradient(145deg, var(--surface2), var(--bg)); box-shadow: inset 1px 1px 0 rgb(229 236 230 / .08), 3px 7px 10px rgb(0 0 0 / .35); }
+.flow-map__branch[data-state="current"] { color: var(--ink); }
+.flow-map__node-index, .flow-map__slots-label { color: var(--muted); }
+.flow-map__slots { border-radius: 8px; padding: 8px 5px; background: var(--bg); }
+.flow-map__direction { fill: none; stroke: var(--muted); stroke-width: 1.6; vector-effect: non-scaling-stroke; opacity: .6; }
+.flow-map__direction[data-active="true"] { stroke: var(--mint); opacity: 1; }
+.flow-map--narrow .flow-map__node { width: 86px; height: 80px; }
+.flow-map--narrow .flow-map__node-symbol { width: 20px; height: 20px; }
+.flow-map--narrow .flow-map__branch { min-height: 46px; width: 76px; }
+.flow-map--narrow .flow-map__slots { width: 108px; }
+.event-caption { padding: 8px 24px 10px; min-height: 0; background: rgb(11 16 16 / .55); }
+.event-caption h2 { font-size: 19px; }
+.event-caption p { line-height: 1.45; margin-top: 5px; font-size: 12px; }
+.caption-actions { display: flex; gap: 8px; align-items: center; }
+.caption-actions .secondary, .detail-button { white-space: nowrap; font-size: 11px; }
+.playback { padding: 10px 0; margin: 0 24px; gap: 8px; }
+.timeline input { height: 44px; margin: 0; display: block; }
+.timeline label { margin-bottom: -6px; font-size: 10px; }
+.speed-label select { height: 44px; padding: 10px 5px; }
+.canvas-foot { padding: 8px 24px; align-items: center; font-size: 9px; }
+footer { height: 44px; padding: 0; display: flex; align-items: center; justify-content: space-between; font-size: 9px; }
+footer>div { align-items: center; gap: 14px; }
+footer a { display: inline-flex; align-items: center; font-size: 10px; }
+#status { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.alternate-panel { min-height: 0; height: 100%; overflow: auto; scrollbar-width: thin; padding: 24px; }
+.panel-heading h2 { font-size: 25px; }
+.empty-compare { padding: 30px 10px; }
+.focus-dialog { width: min(530px, calc(100% - 24px)); max-height: calc(100dvh - 24px); margin: auto; padding: 24px; border: 1px solid var(--line); border-radius: 16px; color: var(--ink); background: var(--surface); box-shadow: 7px 18px 60px rgb(0 0 0 / .5); }
+.focus-dialog::backdrop { background: rgb(4 9 8 / .78); backdrop-filter: blur(6px); }
+.focus-dialog .drawer-top { margin-bottom: 18px; gap: 16px; }
+.focus-dialog h2 { font-size: 23px; margin: 0; }
+.focus-dialog #run { width: 100%; margin-top: 18px; }
+.focus-dialog .result-strip { display: block; padding: 0; margin: 0; border: 0; }
+.focus-dialog .result-strip .eyebrow { display: none; }
+.focus-dialog .result-actions { display: flex; flex-wrap: wrap; margin-top: 22px; gap: 12px; }
+.focus-dialog #variations { display: flex; flex-wrap: wrap; gap: 8px; }
+#conditions-done { width: 100%; margin-top: 10px; }
+#result-done { margin-top: 18px; }
+.compact-controls { display: none; }
+.inspector .icon-button { width: 44px; height: 44px; }
+.inspector summary { display: flex; align-items: center; }
+.inspector .operation-button { min-height: 44px; }
+body.showcase { grid-template-rows: 56px minmax(0, 1fr) 0; }
+.showcase main { display: flex; padding: 14px 0; }
+.showcase .workspace { display: block; height: 100%; margin: 0 auto; }
+.showcase .canvas-panel { grid-template-rows: 76px minmax(0, 1fr) 100px 74px 40px; }
+.showcase #flow-map, .showcase .flow-map { height: 100%; min-height: 0; }
+.showcase .canvas-top, .showcase .event-caption, .showcase .playback, .showcase .canvas-foot { padding-top: 10px; padding-bottom: 10px; }
+.showcase .compact-controls { display: none; }
+@media (max-height: 800px) and (min-width: 701px) {
+  main { grid-template-rows: 48px 44px minmax(0, 1fr); gap: 8px; }
+  .intro .eyebrow { display: none; }
+  .intro h1 { font-size: 27px; }
+  .canvas-panel { grid-template-rows: 62px minmax(0, 1fr) 82px 66px 36px; }
+  .controls { padding-top: 2px; }
+  .control-heading { display: none; }
+  .controls .primary { margin-top: 10px; }
+  .scenario-note { margin: 8px 0 10px; }
+  .draft-note { margin-top: 6px; }
+}
+@media (max-width: 1100px) and (min-width: 701px) {
+  .workspace { grid-template-columns: 190px minmax(0, 1fr); gap: 16px; }
+  .intro>p { font-size: 10px; }
+  .metrics { gap: 16px; }
+  .canvas-top { padding-left: 16px; padding-right: 16px; }
+  .canvas-title .eyebrow { font-size: 8px; max-width: 130px; }
+  .canvas-foot { padding-left: 16px; padding-right: 16px; font-size: 8px; }
+  .event-caption { padding-left: 16px; padding-right: 16px; }
+  .event-caption h2 { font-size: 17px; }
+  .event-caption p { font-size: 11px; }
+}
+@media (max-width: 700px) {
+  body { grid-template-rows: 48px minmax(0, 1fr) 44px; }
+  .header, main, footer { width: calc(100% - 24px); }
+  .header { height: 48px; gap: 6px; }
+  .brand { gap: 7px; }
+  .brand b { font-size: 21px; }
+  .brand-symbol { font-size: 24px; }
+  .brand-divider, .brand-product { display: none; }
+  .header-actions { gap: 6px; }
+  .engine-status { font-size: 8px; gap: 5px; }
+  .intro { display: block; }
+  .intro .eyebrow { display: none; }
+  .intro h1 { font-size: 23px; line-height: 1.15; letter-spacing: -.75px; }
+  .intro>p { display: none; }
+  main { grid-template-rows: 38px 44px minmax(0, 1fr); gap: 6px; padding: 8px 0; }
+  .workspace-tabs { justify-content: space-between; gap: 6px; }
+  .workspace-tabs button { font-size: 12px; padding: 10px 6px; }
+  .workspace { display: grid; grid-template-columns: 1fr; grid-template-rows: 52px minmax(0, 1fr); gap: 8px; }
+  .controls { display: none; }
+  .compact-controls { display: flex; gap: 8px; min-width: 0; padding: 4px 0; }
+  #configure { display: flex; flex: 1; min-width: 0; justify-content: space-between; gap: 8px; font-size: 11px; padding: 8px 10px; }
+  #quick-conditions { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #quick-run { font-size: 11px; padding: 8px 11px; gap: 8px; flex: none; }
+  .canvas-panel { grid-template-rows: 68px minmax(0, 1fr) 102px 66px 48px; border-radius: 12px; }
+  .canvas-top { padding: 8px 12px; align-items: start; gap: 8px; }
+  .canvas-title { max-width: 110px; }
+  .canvas-title .eyebrow { font-size: 8px; line-height: 1.4; margin-bottom: 4px; letter-spacing: .5px; }
+  .mode-badge { font-size: 9px; line-height: 1.4; }
+  .metrics { gap: 10px; }
+  .metrics b { font-size: 16px; }
+  .metrics span { font-size: 9px; margin-top: 3px; }
+  .metrics>div:last-child { max-width: 62px; }
+  .flow-map--narrow .flow-map__node { width: 80px; height: 76px; padding: 8px; }
+  .flow-map--narrow .flow-map__branch { width: 68px; min-height: 46px; }
+  .flow-map--narrow .flow-map__branch-label { font-size: 10px; }
+  .flow-map--narrow .flow-map__slots { width: 99px; }
+  .flow-map--narrow .flow-map__slots-label { font-size: 10px; }
+  .event-caption { padding: 8px 12px; gap: 6px; align-items: center; }
+  .event-caption h2 { font-size: 16px; line-height: 1.3; }
+  .event-caption p { font-size: 10px; line-height: 1.4; margin-top: 4px; }
+  .event-caption .eyebrow { font-size: 7px; letter-spacing: .4px; }
+  .caption-actions { flex-direction: column; gap: 3px; }
+  .caption-actions .secondary, .detail-button { padding: 5px 7px; font-size: 10px; }
+  .detail-button span { margin-left: 4px; }
+  .playback { margin: 0 12px; padding: 6px 0; gap: 4px; flex-wrap: nowrap; }
+  .timeline { min-width: 42px; }
+  .timeline label { font-size: 8px; }
+  .timeline label>span { white-space: nowrap; }
+  #finish { font-size: 9px; width: 44px; padding: 3px; line-height: 1.2; }
+  .speed-label select { width: 44px; font-size: 10px; padding: 4px; }
+  .canvas-foot { padding: 6px 12px; gap: 2px; font-size: 8px; flex-direction: column; align-items: flex-start; justify-content: center; }
+  footer>span { display: none; }
+  footer>div { width: 100%; justify-content: space-between; gap: 8px; }
+  footer .text-button, footer a { font-size: 10px; }
+  .alternate-panel { padding: 16px; }
+  .panel-heading { align-items: flex-start; gap: 8px; }
+  .panel-heading h2 { font-size: 21px; }
+  .panel-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .notebook-form { display: grid; grid-template-columns: 1fr; }
+  .showcase main { padding: 8px 0; }
+  .showcase .header { height: 48px; }
+  body.showcase { grid-template-rows: 48px minmax(0, 1fr) 0; }
+  .showcase .canvas-panel { grid-template-rows: 68px minmax(0, 1fr) 102px 66px 48px; }
+}
+/* Text can grow without being cut off. Short/zoomed viewports retain normal
+   reflow; at the four reference sizes all primary actions fit the viewport. */
+@media (max-height: 620px) {
+  body { height: auto; min-height: 100dvh; }
+  main { min-height: 650px; }
+}
+.skip { min-height: 44px; min-width: 44px; }
+.controls #experiment-form { display: block; }
+.controls #reset { min-height: 44px; padding: 10px 4px; }
+.controls .control-bottom { display: block; }
+[data-flow-slots]:empty { display: none; }
+.engine-status i[data-ready="true"] { background: var(--mint); }
+.flow-map { --active-light: var(--mint); }
+.flow-map[data-outcome="stop"] { --active-light: var(--coral); }
+.flow-map[data-outcome="release"] { --active-light: var(--amber); }
+.flow-map[data-outcome="reconcile"] { --active-light: var(--violet); }
+.flow-map[data-outcome] .flow-map__node[data-state="current"] { border-color: var(--active-light); box-shadow: inset 1px 1px 0 rgb(229 236 230 / .3), 3px 7px 5px rgb(0 0 0 / .38), 8px 16px 23px rgb(0 0 0 / .35), 0 0 30px color-mix(in srgb, var(--active-light) 16%, transparent); }
+
+/* Critic round 2: full replay label and the disclosure's usable hit area. */
+.inspector summary { min-height: 44px; }
+@media (max-width: 700px) {
+  #finish { font-size: 11px; white-space: nowrap; }
+  .canvas-foot { font-size: 10px; line-height: 1.4; }
+  .timeline label, .timeline label span { font-size: 10px; }
+  .engine-status { font-size: 10px; }
+}
+/* The flex parent must not size the presentation by its current caption. */
+.showcase .workspace { width: 100%; max-width: 1400px; flex: 1; }
+.showcase .canvas-panel { width: 100%; }
+
+/* Round3: a new inspection starts at the heading; Close stays reachable while
+   its long evidence scrolls. Retained scroll position cannot clip the opener. */
+.inspector .drawer-top { position: sticky; top: 0; z-index: 5; background: var(--surface); padding: 4px 0; }
