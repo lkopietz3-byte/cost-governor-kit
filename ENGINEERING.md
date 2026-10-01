@@ -183,3 +183,19 @@ confirmed `E404` means "not published yet", an existing version is a no-op rathe
 error, and any other registry error fails the job instead of guessing. Trusted publishing must
 be configured for this package on npmjs.com (linking it to this GitHub repository and the
 `release.yml` workflow) before an automated release will work.
+
+## Threshold repository example
+
+`examples/observatory` is a local browser instrument for real SDK decisions on
+synthetic inputs. Its sequential educational memory ledger supplies no production
+atomicity, persistence, provider billing or reconciliation guarantee. The UI
+labels recorded playback and known estimates, preserving uncertain outcomes.
+The SDK public API and zero-runtime-dependency contract are unchanged.
+
+`npm run verify` also runs `verify:observatory`: validate the prepared module
+hashes against the current source and run the example's Node behavioral checks.
+After a source change, regenerate with `node examples/observatory/tools/vendor-sdk.mjs`.
+The additional checks use `*.check.mjs`, so the Node runner stays distinct from
+Vitest. Browser checks are an explicit local harness described in the example
+README; a source/package pass does not establish a rendered or deployed result.
+The example is outside the published npm files allowlist.

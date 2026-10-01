@@ -55,4 +55,16 @@ export default defineConfig(
       globals: globals.nodeBuiltin,
     },
   },
+  {
+    name: 'kit/browser-observatory',
+    files: ['examples/observatory/app.mjs', 'examples/observatory/lib/**/*.mjs'],
+    languageOptions: { globals: globals.browser },
+    rules: { 'no-restricted-imports': ['error', { patterns: ['node:*'] }] },
+  },
+  {
+    // These Node harnesses pass functions to the browser's execution context.
+    name: 'kit/browser-context-harnesses',
+    files: ['examples/observatory/tools/verify-browser.mjs', 'examples/observatory/tools/capture-showcase.mjs', 'examples/observatory/tools/measure-render.mjs'],
+    languageOptions: { globals: globals.browser },
+  },
 );
