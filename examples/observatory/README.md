@@ -69,7 +69,7 @@ Code and original UI: Lucas Kopietz / PlanrLabs, MIT. The SDK license is preserv
 
 `window.__threshold.state()` returns a frozen, detached snapshot of the visible recorded prefix: cursor, event, known counts, source identity and explicit recorded/synthetic flags. `step(n)` pauses and seeks to an existing journal step; `advance(seconds)` advances a controlled presentation clock at the chosen replay speed. These methods never run the SDK, edit conditions or write the notebook. They reject invalid time/step inputs. A hook on an idle page remains idle until the user runs the real experiment.
 
-The original Claude measurer is in `/Users/lucaskopietz/prompt-forge/tools/shoot.mjs`. Its baseline is useful for comparison, but its contrast estimates do not model gradients, alpha composition or occlusion, and its initial stepped frames do not start a run. The current rendered checks pair deterministic geometry with separate visual critique. Neither a critic score nor a screenshot is proof of real provider cost, performance or live execution.
+An external measurer used during development is not included in this repository. Its historical baseline is useful for comparison, but its contrast estimates do not model gradients, alpha composition or occlusion, and its initial stepped frames do not start a run. The current rendered checks pair deterministic geometry with separate visual critique. Neither a critic score nor a screenshot is proof of real provider cost, performance or live execution.
 
 ## Detailed creative direction
 
