@@ -1,5 +1,7 @@
 # cost-governor-kit
 
+**[Try it in your browser →](https://lkopietz3-byte.github.io/honesty-kits/#cost-governor-kit)** · Part of [honesty kits](https://github.com/lkopietz3-byte/honesty-kits), a family of small checks for the claims an AI product makes.
+
 A small, zero-dependency TypeScript library for three cost-safety jobs in apps
 that call paid AI APIs:
 
