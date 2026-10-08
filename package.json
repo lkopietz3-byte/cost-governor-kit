@@ -1,6 +1,6 @@
 {
   "name": "cost-governor-kit",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates, and reserve/confirm usage-counting helpers whose limits are enforced by your own storage adapter.",
   "keywords": [
     "llm",
@@ -12,7 +12,8 @@
     "prompt-caching",
     "quota",
     "usage-limit",
-    "anthropic"
+    "anthropic",
+    "honesty-kits"
   ],
   "author": "Lucas Kopietz",
   "license": "MIT",
@@ -20,7 +21,7 @@
     "type": "git",
     "url": "git+https://github.com/lkopietz3-byte/cost-governor-kit.git"
   },
-  "homepage": "https://github.com/lkopietz3-byte/cost-governor-kit#readme",
+  "homepage": "https://lkopietz3-byte.github.io/honesty-kits/#cost-governor-kit",
   "bugs": {
     "url": "https://github.com/lkopietz3-byte/cost-governor-kit/issues"
   },
