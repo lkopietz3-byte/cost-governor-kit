@@ -4,6 +4,61 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **`expiresAt` without a time zone is rejected (was read as local time).**
+  `withCapacityReservation` parsed a reservation's `expiresAt` with
+  `Date.parse`, which reads `2026-10-10T16:17:14.411` as the server's local
+  time. Depending on the server's TZ, an expired hold could be accepted or a
+  live one rejected. It also accepted non-ISO text (`"2099"`,
+  `"Dec 25, 2099"`) and rolled impossible dates forward (`02-30` became
+  `03-02`, `T24:00` became the next day). `expiresAt` must now be a strict
+  ISO-8601 date-time ending in `Z` or `±hh:mm`; anything else throws a
+  `RangeError` that names the missing zone.
+- **A throwing work-outcome getter no longer escapes after paid work.** Reading
+  the outcome `doTheWork` returned ran outside the protective `try`, so a
+  getter or proxy trap that threw lost the reservation. It now returns
+  `work_outcome_ambiguous` with the hold kept and neither confirm nor release
+  called, like any other unreadable outcome.
+- **`checkPreCallCeiling` omits `reason` when allowed.** The key used to be
+  present with the value `undefined`.
+- **The ceiling denial message no longer contradicts itself.** A ceiling that is
+  not a whole number of micro-dollars is printed with the extra digits needed to
+  read below the projected total (`$4.9999996`, not `$5.000000`). Whole
+  micro-dollar ceilings print exactly as before.
+- **README usage-mapping snippet** priced `cache_creation_input_tokens` at $0
+  when the `cache_creation` TTL split was absent. It now prices the total as
+  5-minute writes in that case. The README snippet is run by a test.
+
+### Changed
+
+- **Behavior:** `expiresAt` values that used to be accepted now throw: no zone,
+  non-ISO strings, impossible dates, a space instead of `T`, lowercase `t`/`z`,
+  an offset without a colon (`+0000`) or with hours only (`+00`), and more than
+  nine fractional digits. An adapter that returns raw Postgres text such as
+  `2026-10-10 16:17:14.411+00` must format it as ISO first. Fractional seconds
+  past milliseconds are truncated.
+- **Behavior:** the `reason` key is absent (not `undefined`) on an allowed
+  result, which changes `Object.hasOwn`, `Object.keys` and strict-equality
+  checks on the result.
+- CI runs `npm run test:postgres` in a new `postgres` job against a
+  `postgres:17` service container and fails if that suite reports any skipped
+  test.
+- Tests: `test/verdict-table.test.ts` is a named table of verdicts, and
+  `tsconfig.json` now type-checks `test/`. The build still emits only `src/`.
+- The observatory example's vendored SDK copy is regenerated for the new source.
+
+### Documented
+
+- Always pass `outputTokens`, set to the request's `max_tokens` bound, in a
+  ceiling check. An omitted bucket is priced at $0.
+- A call under half a micro-dollar prices at $0, so a running total built from
+  per-call estimates never grows from such calls. Reconcile from the provider's
+  reported usage, or sum token counts and price the sum once.
+- `expiresAt` must carry a time zone.
+
 ## [0.2.1] - 2026-10-07
 
 No change to the library's behavior or API.

@@ -28,6 +28,10 @@
   is only looked up if it is a string.
 - Text built from caller or adapter strings (error messages, `formatRatesForLog`)
   escapes control, line-break and bidi characters. Structured results stay raw.
+- A reservation's `expiresAt` is a strict ISO-8601 date-time that names its
+  zone (`Z` or `±hh:mm`), parsed by `parseIsoInstant` in `src/internal.ts`, not
+  `Date.parse`. A string without a zone is rejected, never read as the machine's
+  local time. `checkPreCallCeiling` omits `reason` when allowed.
 - `withReserveConfirm` never commits a call that throws, and fails closed on a
   non-boolean check. Advisory under concurrency; a rejected `commitUsage`
   returns the result with `commitError` set, not discarded. Detect it with
@@ -35,7 +39,9 @@
   `commitUsage` resolves is ignored, so only a rejection reports a failure.
 - `withCapacityReservation` runs work at most once, only after a validated
   `acquired` decision; calls confirm or release at most once, never both;
-  never retries; never releases after an ambiguous outcome. The strict limit,
+  never retries; never releases after an ambiguous outcome. Reading the work
+  outcome is inside the protective `try`, so an outcome whose getter or proxy
+  throws is `work_outcome_ambiguous` with the hold kept. The strict limit,
   atomicity, duplicate suppression and durability belong to the caller's
   adapter.
 
@@ -76,18 +82,24 @@ CommonJS `require("cost-governor-kit")` work, on Node 20.19+/22.12+
 `build` clears `dist/` before invoking `tsc`, since `tsc` does not delete
 outputs it stopped emitting.
 
+`test/verdict-table.test.ts` is a named table of verdicts (regressions and
+guards); it is part of `npm test` and also runs the README quickstart and usage
+snippets as written.
+
 CI (`.github/workflows/verify.yml`) runs audit, lint, typecheck, test, build,
-`attw` and `verify:package` on Node 26.3.0, plus build, test and
+`attw` and `verify:package` on Node 26.3.0, a `postgres` job running
+`test:postgres` against Postgres 17, plus build, test and
 `verify:package` (which includes the CommonJS consumer probe) on Node 20, 20.19.0,
 22, 22.12.0 and 24. 20.19.0 and 22.12.0 are the exact `require(esm)` floors;
 the unpinned 20 and 22 track the latest release of each line. Actions are
 pinned by commit SHA.
 
 `npm run test:postgres` runs `src/referenceImplPostgres.test.ts` against a
-real, locally running Postgres 17, pointed at by `COST_GOVERNOR_PG_URL`. It is
-skipped (not run) by `npm test`, `npm run verify`, or CI when that variable is
-unset, so it needs no CI infrastructure and adds no dependency to the normal
-verify path. See README.md ("Reference SQL (advisory only)") for the exact
+real Postgres 17, pointed at by `COST_GOVERNOR_PG_URL`. It is skipped by
+`npm test` and `npm run verify` when that variable is unset, so the normal
+verify path needs no database. CI's `postgres` job in `verify.yml` runs it
+against a `postgres:17` service container and fails if the suite reports any
+skipped, pending, failed or zero tests (a skipped suite otherwise exits 0). See README.md ("Reference SQL (advisory only)") for the exact
 commands to start a throwaway server and run it. It is the only test that
 proves anything about concurrent Postgres sessions.
 
@@ -100,7 +112,7 @@ proves anything about concurrent Postgres sessions.
   check/commit/window logic, not concurrent sessions or a live Supabase
   project. The same test extracts the commented TypeScript adapter from the SQL
   file and runs it through a stub of the Supabase client's `rpc()`; it does not
-  run `@supabase/supabase-js`. `npm run test:postgres` (not run by CI; see above) covers real
+  run `@supabase/supabase-js`. `npm run test:postgres` (CI runs it in its own `postgres` job; see above) covers real
   concurrent sessions against a local Postgres 17 and proves
   `usage_ledger_commit_usage`'s row lock caps the recorded count exactly at
   the limit under 50 concurrent commits, and that
