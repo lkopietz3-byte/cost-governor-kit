@@ -41,7 +41,7 @@
  * reference-impl/supabase-usage-ledger.sql is a Postgres sketch of the
  * advisory `UsageLedger` only; this kit ships no `CapacityReservationLedger`.
  */
-import { describe, isBlank, isPlainRecord } from './internal.js';
+import { describe, isBlank, isPlainRecord, parseIsoInstant } from './internal.js';
 /**
  * Advisory check-then-commit around one async call. Not a concurrent limit.
  *
@@ -135,8 +135,9 @@ export async function withReserveConfirm(ledger, key, limit, doTheCall) {
  * - `{ status: 'succeeded' }` leads to one `confirmReservation` call;
  *   `{ status: 'failed' }` to one `releaseReservation` call. It never calls
  *   both, never calls either twice, and never retries.
- * - A thrown or rejected `doTheWork`, or an outcome of the wrong shape,
- *   returns `work_outcome_ambiguous` and keeps the hold. A failed confirm
+ * - A thrown or rejected `doTheWork`, an outcome of the wrong shape, or an
+ *   outcome whose fields throw when read (a hostile getter or proxy), returns
+ *   `work_outcome_ambiguous` and keeps the hold. A failed confirm
  *   returns `confirmation_failed` (with the value) and keeps the hold.
  * - A rejected `reserveCapacity` propagates; no work runs. A hold may or may
  *   not exist; retry with the same operationId to find out.
@@ -156,7 +157,7 @@ export async function withReserveConfirm(ledger, key, limit, doTheCall) {
  *   returns a decision or reservation of the wrong shape.
  * @throws RangeError for a `limit` that is not a safe integer >= 0, a blank
  *   key, operationId or reservation id, a reservation for a different key or
- *   operationId, an unparseable or already-expired `expiresAt`, a terminal
+ *   operationId, an `expiresAt` that is not a strict ISO-8601 timestamp with a zone, or is already expired, a terminal
  *   decision for a different operation, or an unknown decision status.
  */
 export async function withCapacityReservation(ledger, request, doTheWork) {
@@ -187,16 +188,19 @@ export async function withCapacityReservation(ledger, request, doTheWork) {
         throw new RangeError(`withCapacityReservation: adapter returned unknown reservation decision status ${describe(status)}`);
     }
     const reservation = readReservation(decisionRecord.reservation, key, operationId);
-    let outcome;
+    let parsed;
     try {
         // The callback gets a frozen copy, so nothing it does can change the
         // snapshot that is confirmed or released below.
-        outcome = await doTheWork(Object.freeze({ ...reservation }));
+        const outcome = await doTheWork(Object.freeze({ ...reservation }));
+        // Reading the outcome runs the caller's getters or proxy traps. Paid work
+        // has already happened, so a throw here must be the documented ambiguous
+        // result with the hold kept, never an exception that loses the reservation.
+        parsed = readCapacityWorkOutcome(outcome);
     }
     catch (error) {
         return { status: "work_outcome_ambiguous", reservation, error };
     }
-    const parsed = readCapacityWorkOutcome(outcome);
     if (!parsed) {
         return {
             status: "work_outcome_ambiguous",
@@ -250,6 +254,8 @@ function readReserveCapacityRequest(request) {
     }
     return { key, limit, operationId };
 }
+const EXPIRES_AT_MESSAGE = "withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp with a time zone " +
+    "(for example 2026-10-10T16:17:14.411Z or 2026-10-10T11:17:14.411-05:00); a timestamp without Z or an offset is rejected";
 function readReservation(candidate, requestKey, requestOperationId, requireUnexpired = true) {
     if (!candidate || typeof candidate !== "object") {
         throw new TypeError("withCapacityReservation: adapter returned an invalid reservation");
@@ -278,11 +284,14 @@ function readReservation(candidate, requestKey, requestOperationId, requireUnexp
         throw new RangeError("withCapacityReservation: reservation operationId does not match request");
     }
     if (typeof expiresAt !== "string") {
-        throw new TypeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+        throw new TypeError(EXPIRES_AT_MESSAGE);
     }
-    const expiresAtMs = Date.parse(expiresAt);
-    if (!Number.isFinite(expiresAtMs)) {
-        throw new RangeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+    // Strict, zone-required parse. `Date.parse` would read a string without a
+    // zone as this machine's local time, so the same hold could look live or
+    // expired depending on the server's TZ.
+    const expiresAtMs = parseIsoInstant(expiresAt);
+    if (expiresAtMs === undefined) {
+        throw new RangeError(EXPIRES_AT_MESSAGE);
     }
     if (requireUnexpired && expiresAtMs <= Date.now()) {
         throw new RangeError("withCapacityReservation: adapter returned an expired reservation");

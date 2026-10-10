@@ -146,6 +146,19 @@ computed in that order in double precision, then rounded to the nearest
 micro-dollar ($0.000001). `readRate` is `rates.cacheReadPerMillion` when you
 supply it, otherwise `inRate x 0.1`.
 
+> **Warning: an omitted bucket is priced at $0.** Every bucket defaults to 0.
+> For a pre-call estimate, always pass `outputTokens`, set to the request's
+> `max_tokens` bound (the most the call can bill). Leave it out and the output
+> side of the estimate is $0, so `checkPreCallCeiling` allows calls it should
+> refuse.
+>
+> **Warning: a call under half a micro-dollar prices at $0.** Each call is
+> rounded on its own, so a tiny call is free and a running total built by adding
+> per-call estimates never grows from those calls. Do not feed an accumulator
+> from per-call estimates. Instead, reconcile `spentSoFarUsd` from the provider's
+> reported usage after each call, or sum the token counts across calls and price
+> the sum once with `estimateCostUsd`.
+
 - `rates` (`ModelRates`): `{ inputPerMillion, outputPerMillion }`, USD per
   million tokens, each a finite number >= 0, no default; plus an optional
   `cacheReadPerMillion` (also USD per million, >= 0) that overrides the fixed
@@ -169,18 +182,23 @@ it is enumerable, so `Object.defineProperty(usage, 'inputTokens', { value: 5,
 enumerable: false })` prices 5 input tokens.
 Map an Anthropic `usage` block like this (`input_tokens` is the uncached
 remainder; `cache_creation_input_tokens` is the total of the two TTL buckets, so
-don't add it separately):
+don't add it separately when the split is present):
 
 ```js
 const u = response.usage;
+const writes = u.cache_creation; // the per-TTL split; some responses omit it
 const cost = estimateCostUsd(rates, {
   inputTokens: u.input_tokens,
   outputTokens: u.output_tokens,
   cacheReadTokens: u.cache_read_input_tokens ?? 0,
-  cacheCreation5mTokens: u.cache_creation?.ephemeral_5m_input_tokens ?? 0,
-  cacheCreation1hTokens: u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+  // With no split, the whole cache_creation_input_tokens total is priced as
+  // 5-minute writes (the default TTL). Dropping it would price writes at $0.
+  cacheCreation5mTokens: writes ? (writes.ephemeral_5m_input_tokens ?? 0) : (u.cache_creation_input_tokens ?? 0),
+  cacheCreation1hTokens: writes?.ephemeral_1h_input_tokens ?? 0,
 });
 ```
+
+`test/verdict-table.test.ts` runs this exact snippet, read from this file.
 
 **Rounding policy.** `Math.round` to the nearest micro-dollar. A value exactly
 halfway in binary rounds up, but a decimal half can round down because the
@@ -245,7 +263,15 @@ the total to the micro-dollar, and returns:
 
 - `allowed`: `projectedTotalUsd <= ceilingUsd` (landing exactly on the ceiling is allowed)
 - `projectedNextCallCostUsd`, `projectedTotalUsd`, `ceilingUsd` (echoed)
-- `reason`: only when denied, a sentence with the amounts
+- `reason`: only when denied, a sentence with the amounts. When allowed, the
+  `reason` key is absent (not present as `undefined`). A ceiling that is not a
+  whole number of micro-dollars is printed with the extra digits needed to read
+  below the projected total, so a denial never says "$5.000000 exceeds $5.000000".
+
+> **Pass `outputTokens`.** `estimatedNextCallUsage` must include `outputTokens`,
+> set to the call's `max_tokens` bound. If you omit it, output is priced at $0
+> and the ceiling check under-counts the call. Sub-half-micro calls also price at
+> $0; see the warnings under `estimateCostUsd`.
 
 It is pure: no I/O, no clock, no stored state, and it does not mutate its input.
 It throws when the argument, `rates` or the usage estimate is not a plain object
@@ -371,7 +397,13 @@ concurrent requests at limit 3 all run.
   `acquired` decision whose reservation has a non-blank `id`, the request's
   `key` and `operationId`, and an `expiresAt` later than this process's
   `Date.now()` (compared as instants, and read once along with the rest of the
-  decision, reservation and outcome). A malformed or unknown decision throws before any work. If the
+  decision, reservation and outcome). **`expiresAt` must carry a time zone**:
+  a strict ISO-8601 date-time ending in `Z` or an offset like `-05:00`, such as
+  `new Date(ms).toISOString()` returns. `2026-10-10T16:17:14.411` (no zone),
+  `"2099"`, `"Dec 25, 2099"` and impossible dates like February 30 throw a
+  `RangeError` instead of being read in the server's local time. Format
+  database timestamps with an explicit zone (Postgres: `to_char(... at time
+  zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`, or `.toISOString()` on a `Date`). A malformed or unknown decision throws before any work. If the
   adapter did create a hold, the helper leaves it in place (it does not release
   a hold it cannot trust), and with a conforming adapter a retry with the same
   `operationId` then gets `operation_in_progress`.
@@ -382,8 +414,9 @@ concurrent requests at limit 3 all run.
 - `{ status: 'succeeded', value }` leads to exactly one `confirmReservation`
   call; `{ status: 'failed', error }` to exactly one `releaseReservation` call.
   It never calls both, never calls either twice, and never retries.
-- A thrown or rejected `doTheWork` (sync or async), or an outcome of the wrong
-  shape, returns `work_outcome_ambiguous` and keeps the hold. Return `failed`
+- A thrown or rejected `doTheWork` (sync or async), an outcome of the wrong
+  shape, or an outcome whose fields throw when read (a hostile getter or
+  proxy), returns `work_outcome_ambiguous` and keeps the hold. Return `failed`
   only when the provider definitely did not charge.
 - A failed confirm returns `confirmation_failed` with the value and keeps the
   hold. A failed release returns `release_failed` with both errors.
@@ -440,8 +473,9 @@ copy-and-adapt reference material; nothing imports it.
 
 **`src/referenceImplPostgres.test.ts` fills the concurrency gap above.** It is
 skipped unless `COST_GOVERNOR_PG_URL` is set, so it does not run as part of
-`npm test`, `npm run verify`, or CI. Run it yourself against a real, local
-Postgres 17:
+`npm test` or `npm run verify`. CI runs it in its own `postgres` job against a
+Postgres 17 service container and fails that job if the suite reports any skipped
+test. To run it yourself against a real, local Postgres 17:
 
 ```sh
 # Start a throwaway Postgres 17 (adjust paths/port as needed; this does not
@@ -483,6 +517,11 @@ behavior under a network partition or Postgres failover.
 - **The ceiling is only as good as your estimate.** `checkPreCallCeiling`
   prices a guess made before the call. Estimates that run low let more spend
   through. Reconcile `spentSoFarUsd` from each response's actual usage.
+  Supply `outputTokens` (the `max_tokens` bound); an omitted bucket is $0.
+- **Tiny calls are free, so estimates cannot be summed.** A call under
+  $0.0000005 prices at $0. An accumulator fed from per-call estimates never
+  grows from such calls. Reconcile from real usage, or price summed token counts
+  once.
 - **Micro-dollar resolution.** Both the next-call cost and the total are
   rounded, so one check can allow a true total up to about $0.000001 over the
   ceiling, a call under $0.0000005 is priced at $0, and a running total of
@@ -514,6 +553,9 @@ behavior under a network partition or Postgres failover.
   the Supabase client on a single PGlite connection. It was not run with
   `@supabase/supabase-js`, against a live Supabase project, or under concurrent
   sessions.
+- **`expiresAt` needs a zone.** It must be strict ISO-8601 ending in `Z` or an
+  offset. A zone-less timestamp is rejected because it would otherwise be read in
+  the server's local time.
 - **Clock skew.** A newly acquired hold must expire later than this process's
   `Date.now()`. If your app's clock runs ahead of your database's by more than
   the hold's lifetime, every acquire is rejected (and each hold is left for

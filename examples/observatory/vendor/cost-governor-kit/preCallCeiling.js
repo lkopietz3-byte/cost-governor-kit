@@ -113,17 +113,30 @@ export function checkPreCallCeiling(check) {
     }
     const projectedTotalUsd = round6(unroundedProjectedTotalUsd);
     const allowed = projectedTotalUsd <= ceilingUsd;
-    return {
-        allowed,
-        projectedNextCallCostUsd,
-        projectedTotalUsd,
-        ceilingUsd,
-        reason: allowed
-            ? undefined
-            : `Projected total spend $${projectedTotalUsd.toFixed(6)} ` +
+    const result = { allowed, projectedNextCallCostUsd, projectedTotalUsd, ceilingUsd };
+    if (!allowed) {
+        result.reason =
+            `Projected total spend $${projectedTotalUsd.toFixed(6)} ` +
                 `(already spent $${spentSoFarUsd.toFixed(6)} + projected next call $${projectedNextCallCostUsd.toFixed(6)}) ` +
-                `would exceed the ceiling of $${ceilingUsd.toFixed(6)}. Refusing to make the call.`,
-    };
+                `would exceed the ceiling of $${formatCeilingUsd(ceilingUsd, projectedTotalUsd)}. Refusing to make the call.`;
+    }
+    return result;
+}
+/**
+ * The ceiling with six decimals, plus as many more as it takes for the printed
+ * ceiling to read below the printed total. The total is rounded to the
+ * micro-dollar but the ceiling is compared as given, so a ceiling of 4.9999996
+ * printed as "$5.000000" would make a denial read "$5.000000 exceeds
+ * $5.000000". A ceiling that is a whole number of micro-dollars prints exactly
+ * as before.
+ */
+function formatCeilingUsd(ceilingUsd, projectedTotalUsd) {
+    for (let digits = 6; digits <= 20; digits += 1) {
+        const text = ceilingUsd.toFixed(digits);
+        if (Number(text) < projectedTotalUsd)
+            return text;
+    }
+    return ceilingUsd.toFixed(20);
 }
 const RATES_REQUIRED_MESSAGE = 'checkPreCallCeiling: `rates` (a plain object with non-negative finite numeric inputPerMillion/outputPerMillion) is required. ' +
     'This library never defaults or hardcodes a price — pass the live rate explicitly, ' +

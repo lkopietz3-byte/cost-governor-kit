@@ -58,9 +58,10 @@ assert.throws(() => getRatesOrThrow({ 'toy-model': rates }, 'constructor'), /no 
 const atCeiling = checkPreCallCeiling({
   rates, spentSoFarUsd: 4, ceilingUsd: 7, estimatedNextCallUsage: { inputTokens: 1_000_000 },
 });
-assert.deepEqual(atCeiling, {
-  allowed: true, projectedNextCallCostUsd: 3, projectedTotalUsd: 7, ceilingUsd: 7, reason: undefined,
+assert.deepStrictEqual(atCeiling, {
+  allowed: true, projectedNextCallCostUsd: 3, projectedTotalUsd: 7, ceilingUsd: 7,
 });
+assert.equal(Object.hasOwn(atCeiling, 'reason'), false);
 const denied = checkPreCallCeiling({
   rates, spentSoFarUsd: 0, ceilingUsd: 0, estimatedNextCallUsage: { inputTokens: 1_000_000 },
 });

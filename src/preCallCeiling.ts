@@ -70,7 +70,7 @@ export interface PreCallCeilingResult {
   projectedTotalUsd: number;
   /** Echoed from the input. */
   ceilingUsd: number;
-  /** Present only when `allowed` is false: a human-readable explanation with the amounts. */
+  /** Present only when `allowed` is false (the key is absent, not `undefined`, when allowed): a human-readable explanation with the amounts. */
   reason?: string;
 }
 
@@ -169,17 +169,30 @@ export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingR
   const projectedTotalUsd = round6(unroundedProjectedTotalUsd);
   const allowed = projectedTotalUsd <= ceilingUsd;
 
-  return {
-    allowed,
-    projectedNextCallCostUsd,
-    projectedTotalUsd,
-    ceilingUsd,
-    reason: allowed
-      ? undefined
-      : `Projected total spend $${projectedTotalUsd.toFixed(6)} ` +
-        `(already spent $${spentSoFarUsd.toFixed(6)} + projected next call $${projectedNextCallCostUsd.toFixed(6)}) ` +
-        `would exceed the ceiling of $${ceilingUsd.toFixed(6)}. Refusing to make the call.`,
-  };
+  const result: PreCallCeilingResult = { allowed, projectedNextCallCostUsd, projectedTotalUsd, ceilingUsd };
+  if (!allowed) {
+    result.reason =
+      `Projected total spend $${projectedTotalUsd.toFixed(6)} ` +
+      `(already spent $${spentSoFarUsd.toFixed(6)} + projected next call $${projectedNextCallCostUsd.toFixed(6)}) ` +
+      `would exceed the ceiling of $${formatCeilingUsd(ceilingUsd, projectedTotalUsd)}. Refusing to make the call.`;
+  }
+  return result;
+}
+
+/**
+ * The ceiling with six decimals, plus as many more as it takes for the printed
+ * ceiling to read below the printed total. The total is rounded to the
+ * micro-dollar but the ceiling is compared as given, so a ceiling of 4.9999996
+ * printed as "$5.000000" would make a denial read "$5.000000 exceeds
+ * $5.000000". A ceiling that is a whole number of micro-dollars prints exactly
+ * as before.
+ */
+function formatCeilingUsd(ceilingUsd: number, projectedTotalUsd: number): string {
+  for (let digits = 6; digits <= 20; digits += 1) {
+    const text = ceilingUsd.toFixed(digits);
+    if (Number(text) < projectedTotalUsd) return text;
+  }
+  return ceilingUsd.toFixed(20);
 }
 
 const RATES_REQUIRED_MESSAGE =

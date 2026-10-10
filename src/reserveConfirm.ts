@@ -42,7 +42,7 @@
  * advisory `UsageLedger` only; this kit ships no `CapacityReservationLedger`.
  */
 
-import { describe, isBlank, isPlainRecord } from './internal.js';
+import { describe, isBlank, isPlainRecord, parseIsoInstant } from './internal.js';
 
 /**
  * Storage contract for the advisory {@link withReserveConfirm} helper. `key`
@@ -183,9 +183,13 @@ export interface CapacityReservation {
   /** Stable idempotency key for one logical upstream operation. */
   operationId: string;
   /**
-   * Expiry chosen by the adapter; must parse with `Date.parse`. For a newly
-   * acquired hold it must also be later than this process's `Date.now()`, so
-   * clock skew between the adapter and the app matters.
+   * Expiry chosen by the adapter: a strict ISO-8601 date-time that names its
+   * zone, `Z` or an offset like `-05:00` (for example `2026-10-10T16:17:14.411Z`,
+   * what `Date.prototype.toISOString` returns). A timestamp without a zone,
+   * a non-ISO string such as `"2099"` or `"Dec 25, 2099"`, and an impossible
+   * date such as February 30 are rejected, never read in the server's local
+   * time. For a newly acquired hold it must also be later than this process's
+   * `Date.now()`, so clock skew between the adapter and the app matters.
    */
   expiresAt: string;
 }
@@ -311,8 +315,9 @@ export type CapacityReservationResult<T> =
  * - `{ status: 'succeeded' }` leads to one `confirmReservation` call;
  *   `{ status: 'failed' }` to one `releaseReservation` call. It never calls
  *   both, never calls either twice, and never retries.
- * - A thrown or rejected `doTheWork`, or an outcome of the wrong shape,
- *   returns `work_outcome_ambiguous` and keeps the hold. A failed confirm
+ * - A thrown or rejected `doTheWork`, an outcome of the wrong shape, or an
+ *   outcome whose fields throw when read (a hostile getter or proxy), returns
+ *   `work_outcome_ambiguous` and keeps the hold. A failed confirm
  *   returns `confirmation_failed` (with the value) and keeps the hold.
  * - A rejected `reserveCapacity` propagates; no work runs. A hold may or may
  *   not exist; retry with the same operationId to find out.
@@ -332,7 +337,7 @@ export type CapacityReservationResult<T> =
  *   returns a decision or reservation of the wrong shape.
  * @throws RangeError for a `limit` that is not a safe integer >= 0, a blank
  *   key, operationId or reservation id, a reservation for a different key or
- *   operationId, an unparseable or already-expired `expiresAt`, a terminal
+ *   operationId, an `expiresAt` that is not a strict ISO-8601 timestamp with a zone, or is already expired, a terminal
  *   decision for a different operation, or an unknown decision status.
  */
 export async function withCapacityReservation<T>(
@@ -368,16 +373,18 @@ export async function withCapacityReservation<T>(
   }
 
   const reservation = readReservation(decisionRecord.reservation, key, operationId);
-  let outcome: unknown;
+  let parsed: ReturnType<typeof readCapacityWorkOutcome<T>>;
   try {
     // The callback gets a frozen copy, so nothing it does can change the
     // snapshot that is confirmed or released below.
-    outcome = await doTheWork(Object.freeze({ ...reservation }));
+    const outcome: unknown = await doTheWork(Object.freeze({ ...reservation }));
+    // Reading the outcome runs the caller's getters or proxy traps. Paid work
+    // has already happened, so a throw here must be the documented ambiguous
+    // result with the hold kept, never an exception that loses the reservation.
+    parsed = readCapacityWorkOutcome<T>(outcome);
   } catch (error) {
     return { status: "work_outcome_ambiguous", reservation, error };
   }
-
-  const parsed = readCapacityWorkOutcome<T>(outcome);
   if (!parsed) {
     return {
       status: "work_outcome_ambiguous",
@@ -435,6 +442,10 @@ function readReserveCapacityRequest(request: ReserveCapacityRequest): ReserveCap
   return { key, limit, operationId };
 }
 
+const EXPIRES_AT_MESSAGE =
+  "withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp with a time zone " +
+  "(for example 2026-10-10T16:17:14.411Z or 2026-10-10T11:17:14.411-05:00); a timestamp without Z or an offset is rejected";
+
 function readReservation(
   candidate: unknown,
   requestKey: string,
@@ -468,11 +479,14 @@ function readReservation(
     throw new RangeError("withCapacityReservation: reservation operationId does not match request");
   }
   if (typeof expiresAt !== "string") {
-    throw new TypeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+    throw new TypeError(EXPIRES_AT_MESSAGE);
   }
-  const expiresAtMs = Date.parse(expiresAt);
-  if (!Number.isFinite(expiresAtMs)) {
-    throw new RangeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+  // Strict, zone-required parse. `Date.parse` would read a string without a
+  // zone as this machine's local time, so the same hold could look live or
+  // expired depending on the server's TZ.
+  const expiresAtMs = parseIsoInstant(expiresAt);
+  if (expiresAtMs === undefined) {
+    throw new RangeError(EXPIRES_AT_MESSAGE);
   }
   if (requireUnexpired && expiresAtMs <= Date.now()) {
     throw new RangeError("withCapacityReservation: adapter returned an expired reservation");
