@@ -29,9 +29,9 @@
  * different number.
  */
 import { describe, escapeText, isBlank, isPlainRecord, parseIsoInstant } from './internal.js';
-import { buildMicrosRates, costMicros, isMicrosShaped, priceFor, } from './micros.js';
+import { buildMicrosRates, estimateCostMicros, priceFor, } from './micros.js';
 // Integer-micro prices, tables and exact cost math live in micros.ts.
-export { costMicros, priceFor };
+export { estimateCostMicros, priceFor };
 /**
  * Cache reads (`cache_read_input_tokens`) are priced at 0.1x the base input
  * rate by default. This matches Anthropic's standard multiplier, but not
@@ -255,51 +255,12 @@ export function getRatesOrThrow(table, model) {
     return rates;
 }
 // ---------------------------------------------------------------------------
-// Integer micro-dollars
-// ---------------------------------------------------------------------------
-/**
- * The cost of one call in whole micro-dollars (1 = $0.000001), ROUNDED UP,
- * for budgets and reservations that count integers.
- *
- * Validation, buckets and formula are exactly those of {@link estimateCostUsd}
- * (the unscaled sum it divides by 1,000,000 is already in micro-dollars).
- * The difference is the rounding: this rounds up, so a call that costs a
- * fraction of a micro-dollar counts as 1, never as 0, and a running total of
- * these values never under-counts. A sum within floating-point noise of a
- * whole number (a relative 1e-12, at least 1e-9 and at most 1e-6 of a
- * micro-dollar) is taken as that number, so
- * `3 x 0.1`-style binary error does not add a micro-dollar. Zero usage is 0;
- * any positive cost, however small, is at least 1.
- *
- * Because it rounds up, `estimateCostMicros(r, u)` can be one more than
- * `estimateCostUsd(r, u) * 1e6`.
- *
- * @throws exactly what {@link estimateCostUsd} throws (messages prefixed
- *   `estimateCostMicros:`), and Error if the result is not a safe integer.
- */
-export function estimateCostMicros(rates, usage) {
-    const micros = sumUnscaledMicros('estimateCostMicros', rates, usage);
-    if (!Number.isFinite(micros)) {
-        throw new Error('estimateCostMicros: calculated cost must remain finite');
-    }
-    const nearest = Math.round(micros);
-    // Snap only floating-point noise: a relative 1e-12, never more than 1e-6 of
-    // a micro-dollar, so a real fraction is always rounded up.
-    const tolerance = Math.min(1e-6, Math.max(1e-9, micros * 1e-12));
-    let result = Math.abs(micros - nearest) <= tolerance ? nearest : Math.ceil(micros);
-    // A positive cost is never free, however small: never snap it to 0.
-    if (result === 0 && micros > 0)
-        result = 1;
-    if (!Number.isSafeInteger(result)) {
-        throw new Error('estimateCostMicros: calculated cost must remain a safe integer');
-    }
-    return result;
-}
-// ---------------------------------------------------------------------------
 // Provider usage mappers
 // ---------------------------------------------------------------------------
 /**
- * Map an Anthropic Messages API `usage` block to {@link UsageTokens}.
+ * The strict parser behind {@link usageFromAnthropic}: it maps an Anthropic
+ * Messages API `usage` block to {@link UsageTokens} and THROWS wherever the
+ * public function reports `unknown`.
  *
  * - `input_tokens` and `output_tokens` are required non-negative safe
  *   integers. (A streaming `message_delta` usage alone is incomplete; merge it
@@ -312,7 +273,7 @@ export function estimateCostMicros(rates, usage) {
  *   `cache_creation_input_tokens` total is priced as 5-minute writes (the
  *   default TTL), never dropped.
  * - `service_tier` (a string) is accepted and ignored: fold the tier's price
- *   into the rates you pass. `server_tool_use` is accepted only when every
+ *   into the prices you pass. `server_tool_use` is accepted only when every
  *   count in it is 0, because per-request tool fees are not priced by this
  *   kit; price them separately and pass a copy without that field.
  * - Nullable fields (`cache_*`, `cache_creation`, `server_tool_use`,
@@ -325,7 +286,7 @@ export function estimateCostMicros(rates, usage) {
  *   RangeError for an invalid count, a cache-write total that disagrees with
  *   its split, or a nonzero server-tool count.
  */
-export function usageFromAnthropic(usage) {
+function parseAnthropicUsage(usage) {
     const fn = 'usageFromAnthropic';
     const record = readProviderRecord(fn, 'usage', usage, [
         'input_tokens',
@@ -380,7 +341,9 @@ export function usageFromAnthropic(usage) {
     return { inputTokens, outputTokens, cacheReadTokens, cacheCreation5mTokens, cacheCreation1hTokens };
 }
 /**
- * Map an OpenAI `usage` object to {@link UsageTokens}. Accepts either the
+ * The strict parser behind {@link usageFromOpenAI}: it maps an OpenAI `usage`
+ * object to {@link UsageTokens} and THROWS wherever the public function
+ * reports `unknown`. Accepts either the
  * Chat Completions shape (`prompt_tokens`, `completion_tokens`,
  * `prompt_tokens_details`, `completion_tokens_details`) or the Responses API
  * shape (`input_tokens`, `output_tokens`, `input_tokens_details`,
@@ -388,9 +351,9 @@ export function usageFromAnthropic(usage) {
  *
  * - Cached prompt tokens (`*_details.cached_tokens`) map to `cacheReadTokens`
  *   and are subtracted from the prompt total to get uncached `inputTokens`.
- *   **Set `cacheReadPerMillion` in your rates**: OpenAI's cached-input
- *   discount is not the 0.1x default ({@link CACHE_READ_MULTIPLIER}) for every
- *   model, and the default would under-price those reads.
+ *   **Set `cacheReadPerMTokMicros` in your price**: OpenAI's cached-input
+ *   discount differs by model, and `estimateCostMicros` throws for cache reads
+ *   with no cache-read price.
  * - Output maps to `outputTokens`; reasoning and prediction tokens are already
  *   included in it and are only checked (`reasoning_tokens` must not exceed it).
  * - `total_tokens`, when present, must equal prompt + completion.
@@ -404,7 +367,7 @@ export function usageFromAnthropic(usage) {
  *   total, reasoning tokens above the output, a total that does not add up,
  *   or nonzero audio tokens.
  */
-export function usageFromOpenAI(usage) {
+function parseOpenAIUsage(usage) {
     const fn = 'usageFromOpenAI';
     const chatKeys = ['prompt_tokens', 'completion_tokens', 'total_tokens', 'prompt_tokens_details', 'completion_tokens_details'];
     const responsesKeys = ['input_tokens', 'output_tokens', 'total_tokens', 'input_tokens_details', 'output_tokens_details'];
@@ -493,9 +456,6 @@ function readProviderCount(fn, path, value, optional) {
     }
     return value;
 }
-// ---------------------------------------------------------------------------
-// Usage readers that return "unknown" instead of throwing
-// ---------------------------------------------------------------------------
 /** Make every count a plain non-negative number: `-0` reads as `0`. */
 function plainCounts(usage) {
     const out = {};
@@ -506,59 +466,100 @@ function plainCounts(usage) {
     }
     return out;
 }
-/**
- * Read an Anthropic Messages API `usage` block, or say `'unknown'`.
- *
- * Returns the token counts exactly as {@link usageFromAnthropic} maps them
- * (same rules for cache reads, the 5-minute and 1-hour cache-write split, and
- * a `cache_creation_input_tokens` total with no split, which is priced as
- * 5-minute writes, never dropped). Wherever {@link usageFromAnthropic} would
- * throw, this returns `'unknown'` instead, and it never throws:
- *
- * - `usage` is missing, `null`, or not a plain object;
- * - `input_tokens` or `output_tokens` is missing, or any count (including a
- *   cache field that is present) is not a non-negative safe integer: a string
- *   such as `"123"`, `NaN`, `Infinity`, a fraction, a BigInt, or above 2^53 - 1;
- * - a field this version does not know about is present (it might be a new
- *   billed bucket), a cache-write total disagrees with its split, or tool
- *   fees are nonzero;
- * - a getter, Proxy trap or revoked Proxy throws.
- *
- * A cache field that is absent or `null` counts as 0, because Anthropic omits
- * them when no caching was used on older API versions; a field that is present
- * but malformed is unknown. `'unknown'` is the right input to
- * `{ usage: 'unknown' }`, which keeps the reserved estimate. Never treat it as
- * zero. Each field is read once, and `-0` reads as `0`.
- */
-export function readAnthropicUsage(usage) {
+/** A short, escaped reason from whatever was thrown; never throws itself. */
+function reasonOf(error) {
     try {
-        return plainCounts(usageFromAnthropic(usage));
+        if (error instanceof Error && typeof error.message === 'string') {
+            return escapeText(error.message.length > 200 ? `${error.message.slice(0, 200)}…` : error.message);
+        }
     }
     catch {
-        return 'unknown';
+        // a hostile error object: fall through to the generic reason
+    }
+    return 'usage could not be read';
+}
+function readUsage(parse, usage) {
+    try {
+        return { status: 'known', usage: plainCounts(parse(usage)) };
+    }
+    catch (error) {
+        return { status: 'unknown', reason: reasonOf(error) };
     }
 }
 /**
- * Read an OpenAI `usage` object (Chat Completions or Responses shape), or say
- * `'unknown'`. The counterpart of {@link readAnthropicUsage}: the same token
- * counts as {@link usageFromOpenAI} (cached prompt tokens become
- * `cacheReadTokens` and are subtracted from `inputTokens`), and `'unknown'`
- * wherever {@link usageFromOpenAI} would throw. A response with no `usage` at
- * all is `'unknown'`, never zero. Never throws.
+ * Read an Anthropic Messages API `usage` block: `{ status: 'known', usage }`
+ * with the token counts, or `{ status: 'unknown', reason }`. Never throws.
+ *
+ * - `input_tokens` and `output_tokens` are required non-negative safe
+ *   integers. (A streaming `message_delta` usage alone is incomplete; merge it
+ *   with the `message_start` usage first.)
+ * - `cache_read_input_tokens` maps to `cacheReadTokens`.
+ * - Cache writes: when the `cache_creation` split is present, its
+ *   `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` map to the 5m
+ *   and 1h buckets, and `cache_creation_input_tokens`, if also present, must
+ *   equal their sum. When the split is absent, the whole
+ *   `cache_creation_input_tokens` total is priced as 5-minute writes (the
+ *   default TTL), never dropped.
+ * - A cache field that is **absent** (or `null`) counts as 0: older API
+ *   versions omit them when no caching was used. One that is present but
+ *   malformed makes the reading unknown.
+ * - `service_tier` (a string) is accepted and ignored: fold the tier's price
+ *   into the prices you pass. `server_tool_use` is accepted only when every
+ *   count in it is 0, because per-request tool fees are not priced by this kit.
+ *
+ * The reading is `unknown` when `usage` is missing, `null` or not a plain
+ * object; `input_tokens` or `output_tokens` is missing; any count is not a
+ * non-negative safe integer (a string such as `"123"`, `NaN`, `Infinity`, a
+ * fraction, a BigInt, or above 2^53 - 1); a field this version does not know is
+ * present (it might be a new billed bucket); a cache-write total disagrees
+ * with its split; tool fees are nonzero; or a getter or Proxy trap throws.
+ * `reason` is a short escaped sentence for logs. Each field is read once, and
+ * `-0` reads as `0`.
  */
-export function readOpenAIUsage(usage) {
-    try {
-        return plainCounts(usageFromOpenAI(usage));
-    }
-    catch {
-        return 'unknown';
-    }
+export function usageFromAnthropic(usage) {
+    return readUsage(parseAnthropicUsage, usage);
 }
+/**
+ * Read an OpenAI `usage` object (Chat Completions or Responses shape):
+ * `{ status: 'known', usage }` or `{ status: 'unknown', reason }`. Never
+ * throws. Cached prompt tokens become `cacheReadTokens` and are subtracted
+ * from `inputTokens`; a Chat Completions shape and a Responses shape mixed
+ * together, cached tokens above the prompt total, a `total_tokens` that does
+ * not add up, nonzero audio tokens and every other case that
+ * {@link usageFromAnthropic} lists are `unknown`. A response with no `usage`
+ * at all is `unknown`, never zero.
+ */
+export function usageFromOpenAI(usage) {
+    return readUsage(parseOpenAIUsage, usage);
+}
+// ---------------------------------------------------------------------------
+// Dated pricing tables
+// ---------------------------------------------------------------------------
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 // provider: lowercase letters, digits, '-' or '_'; model: no whitespace (it may contain ':', as some Bedrock ids do).
 const PRICING_KEY = /^[a-z0-9][a-z0-9_-]*:\S+$/;
 const DAY_MS = 86_400_000;
-const RATE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion'];
+/**
+ * Validate and freeze a dated pricing table. This kit ships no prices: you
+ * supply them, with the date you checked them and where you read them.
+ *
+ * Each entry is `{ inputPerMTokMicros, outputPerMTokMicros,
+ * cacheWritePerMTokMicros?, cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?,
+ * longContext? }`: every price a non-negative safe integer of micro-dollars per
+ * million tokens (a value above 2^53 - 1 is rejected and a BigInt is not
+ * accepted). Look prices up with {@link priceFor} and cost usage with
+ * {@link estimateCostMicros}.
+ *
+ * Any other key in an entry (a typo like `cacheWritePerMillion`) throws. Keys
+ * must look like `provider:model` with a lowercase provider. The result is
+ * frozen all the way down, with a null-prototype `rates` record, so editing
+ * your input afterward changes nothing. A `-0` price reads as 0. Each entry is
+ * read once. Pure: no clock is read here; check age with
+ * {@link assertPricingFresh}.
+ *
+ * @throws TypeError for a wrong type or shape, RangeError for a bad date,
+ *   blank source, empty table, malformed key or invalid price.
+ */
 export function definePricingTable(definition) {
     const fn = 'definePricingTable';
     if (!isPlainRecord(definition)) {
@@ -592,20 +593,24 @@ export function definePricingTable(definition) {
         }
         entries.push([key, rawRates[key]]);
     }
-    const microsCount = entries.filter(([, entry]) => isMicrosShaped(entry)).length;
-    if (microsCount > 0 && microsCount < entries.length) {
-        throw new RangeError(`${fn}: rates mixes integer-micro entries (inputPerMTokMicros, ...) with per-million entries (inputPerMillion, ...); use one shape per table`);
-    }
-    if (microsCount > 0) {
-        return Object.freeze({ checkedAt: checkedAt, source, rates: buildMicrosRates(fn, entries) });
-    }
-    const rates = Object.create(null);
-    for (const [key, entry] of entries) {
-        rates[key] = Object.freeze(readDatedRates(fn, key, entry));
-    }
-    return Object.freeze({ checkedAt: checkedAt, source, rates: Object.freeze(rates) });
+    return Object.freeze({ checkedAt: checkedAt, source, rates: buildMicrosRates(fn, entries) });
 }
-export function assertPricingFresh(table, nowOrOptions, maxAgeDaysArg) {
+/**
+ * Throw unless `table` was checked within the last `maxAgeDays` days of
+ * `now`. Call it at startup or per request, with a `now` from your clock.
+ * The options object's two fields are each read once, and any other key is
+ * rejected.
+ *
+ * A table that is exactly `maxAgeDays` old passes; one millisecond older
+ * fails. A `checkedAt` up to one day in the future is allowed (a date written
+ * in a time zone ahead of UTC); further in the future throws.
+ *
+ * @throws TypeError or RangeError for a malformed table or options, an invalid
+ *   `now`, or a `maxAgeDays` that is not a finite number > 0; RangeError for a
+ *   `checkedAt` more than a day in the future; Error when the table is older
+ *   than `maxAgeDays` (the message names its date, age and source).
+ */
+export function assertPricingFresh(table, options) {
     const fn = 'assertPricingFresh';
     if (!isPlainRecord(table)) {
         throw new TypeError(`${fn}: table must come from definePricingTable`);
@@ -613,20 +618,16 @@ export function assertPricingFresh(table, nowOrOptions, maxAgeDaysArg) {
     const checkedAt = table.checkedAt;
     const source = table.source;
     const checkedMs = readCheckedAt(fn, checkedAt);
-    let now = nowOrOptions;
-    let maxAgeDays = maxAgeDaysArg;
-    if (isPlainRecord(nowOrOptions)) {
-        if (maxAgeDaysArg !== undefined) {
-            throw new TypeError(`${fn}: pass maxAgeDays inside the options object, not as a third argument`);
-        }
-        for (const key of Reflect.ownKeys(nowOrOptions)) {
-            if (key !== 'now' && key !== 'maxAgeDays') {
-                throw new TypeError(`${fn}: options must have only now and maxAgeDays`);
-            }
-        }
-        now = Object.hasOwn(nowOrOptions, 'now') ? nowOrOptions.now : undefined;
-        maxAgeDays = Object.hasOwn(nowOrOptions, 'maxAgeDays') ? nowOrOptions.maxAgeDays : undefined;
+    if (!isPlainRecord(options)) {
+        throw new TypeError(`${fn}: options must be { now, maxAgeDays }`);
     }
+    for (const key of Reflect.ownKeys(options)) {
+        if (key !== 'now' && key !== 'maxAgeDays') {
+            throw new TypeError(`${fn}: options must have only now and maxAgeDays`);
+        }
+    }
+    const now = Object.hasOwn(options, 'now') ? options.now : undefined;
+    const maxAgeDays = Object.hasOwn(options, 'maxAgeDays') ? options.maxAgeDays : undefined;
     let nowMs;
     try {
         nowMs = Date.prototype.getTime.call(now);
@@ -654,35 +655,6 @@ export function assertPricingFresh(table, nowOrOptions, maxAgeDaysArg) {
             'and update checkedAt.');
     }
 }
-/**
- * Look up `provider:model` in a dated table. Throws for an unknown key; there
- * is no fallback price. Only the table's own keys match. The entry is
- * re-validated and returned as a fresh {@link ModelRates} object.
- *
- * @throws TypeError when `table` or its `rates` is not a plain object or `key`
- *   is not a string; RangeError for an entry with invalid rates; Error naming
- *   the key and listing the known keys when there is no entry.
- */
-export function lookupRatesOrThrow(table, key) {
-    const fn = 'lookupRatesOrThrow';
-    if (!isPlainRecord(table)) {
-        throw new TypeError(`${fn}: table must come from definePricingTable`);
-    }
-    const rates = table.rates;
-    if (!isPlainRecord(rates)) {
-        throw new TypeError(`${fn}: table.rates must be a plain object keyed by provider:model`);
-    }
-    if (typeof key !== 'string') {
-        throw new TypeError(`${fn}: key must be a provider:model string`);
-    }
-    if (!Object.hasOwn(rates, key)) {
-        const known = Object.keys(rates).map(escapeText).join(', ') || '(empty table)';
-        throw new Error(`cost-governor-kit: no pricing entry for "${escapeText(key)}". Known: ${known}. ` +
-            'Add it to your dated pricing table; there is no fallback price.');
-    }
-    const entry = readDatedRates(fn, key, rates[key]);
-    return { ...entry };
-}
 /** Parse a `checkedAt` (date-only or zoned instant) to epoch ms, or throw. */
 function readCheckedAt(fn, checkedAt) {
     if (typeof checkedAt !== 'string') {
@@ -694,27 +666,4 @@ function readCheckedAt(fn, checkedAt) {
         throw new RangeError(`${fn}: checkedAt ${describe(checkedAt)} must be a real YYYY-MM-DD date or an ISO-8601 date-time with a zone`);
     }
     return ms;
-}
-function readDatedRates(fn, key, value) {
-    const where = `rates[${describe(key)}]`;
-    if (!isPlainRecord(value)) {
-        throw new TypeError(`${fn}: ${where} must be a plain object with ${RATE_FIELDS.join(', ')}`);
-    }
-    for (const field of Reflect.ownKeys(value)) {
-        if (typeof field === 'symbol' || !RATE_FIELDS.includes(field)) {
-            throw new TypeError(`${fn}: ${where} has unknown field ${typeof field === 'symbol' ? '(a symbol)' : describe(field)}; expected only ${RATE_FIELDS.join(', ')}`);
-        }
-    }
-    const out = {};
-    for (const field of RATE_FIELDS) {
-        const rate = value[field];
-        if (typeof rate !== 'number') {
-            throw new TypeError(`${fn}: ${where}.${field} must be a non-negative finite number (required in a dated table)`);
-        }
-        if (!Number.isFinite(rate) || rate < 0) {
-            throw new RangeError(`${fn}: ${where}.${field} must be a non-negative finite number`);
-        }
-        out[field] = rate;
-    }
-    return out;
 }
