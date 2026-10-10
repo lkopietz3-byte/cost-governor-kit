@@ -230,7 +230,8 @@ export interface ReserveCapacityRequest {
  *
  * - `usage: 'reported'`: the work reported its real cost; record `amount`
  *   (which can be more than `reservedAmount` when the estimate ran low; record
- *   it anyway, never cap it at the hold).
+ *   it anyway, never cap it at the hold; the result's `overrunAmount` reports
+ *   the difference). A reported `-0` is recorded as `0`.
  * - `usage: 'unknown'`: the work could not report its cost (or did not say);
  *   `amount` equals `reservedAmount`, the full estimate. Unknown is never zero.
  */
@@ -322,6 +323,13 @@ export type CapacityReservationResult<T> =
       value: T;
       /** Present only when the request had an `amount`: what `confirmReservation` was asked to record. */
       settlement?: CapacitySettlement;
+      /**
+       * Present only when the reported actual amount was MORE than the hold
+       * (`settlement.amount - settlement.reservedAmount`, at least 1). The
+       * full actual amount was still recorded; this field only makes the
+       * overrun visible, so alert on it. Absent otherwise.
+       */
+      overrunAmount?: number;
     }
   | { status: "released_after_failure"; reservation: CapacityReservation; error: unknown }
   | {
@@ -342,6 +350,8 @@ export type CapacityReservationResult<T> =
       error: unknown;
       /** Present only when the request had an `amount`. */
       settlement?: CapacitySettlement;
+      /** Present only when the actual amount was more than the hold; see the `confirmed` result. */
+      overrunAmount?: number;
     };
 
 /**
@@ -474,11 +484,14 @@ export async function withCapacityReservation<T>(
       return { status: "confirmation_failed", reservation, value: parsed.value, error };
     }
   }
+  // An actual amount above the hold is recorded as is (see readSettle); the
+  // result also says by how much, and only when it happened.
+  const overrun = settlement.amount > settlement.reservedAmount ? { overrunAmount: settlement.amount - settlement.reservedAmount } : {};
   try {
     await ledger.confirmReservation(reservation, settlement);
-    return { status: "confirmed", reservation, value: parsed.value, settlement };
+    return { status: "confirmed", reservation, value: parsed.value, settlement, ...overrun };
   } catch (error) {
-    return { status: "confirmation_failed", reservation, value: parsed.value, error, settlement };
+    return { status: "confirmation_failed", reservation, value: parsed.value, error, settlement, ...overrun };
   }
 }
 
@@ -496,7 +509,7 @@ function readSettle(settle: unknown, reservedAmount: number): CapacitySettlement
     if (typeof actualAmount !== "number" || !Number.isSafeInteger(actualAmount) || actualAmount < 0) {
       throw new RangeError("withCapacityReservation: outcome.settle.actualAmount must be a non-negative safe integer");
     }
-    return Object.freeze({ usage: "reported", amount: actualAmount, reservedAmount });
+    return Object.freeze({ usage: "reported", amount: actualAmount + 0, reservedAmount }); // -0 reads as 0
   }
   if (keys.length === 1 && keys[0] === "usage") {
     const usage: unknown = settle.usage;
@@ -630,6 +643,16 @@ function readCapacityWorkOutcome<T>(
 /** Where a {@link CommitOnce} is: never called, running, done, or failed for good. */
 export type CommitOnceState = "idle" | "pending" | "committed" | "failed";
 
+/**
+ * What {@link CommitOnce.attempt} resolves to. `ran` is true only for the call
+ * that actually executed the commit function (also when it then threw or
+ * rejected); every other call, concurrent or later, joins and gets `ran: false`
+ * with the same outcome.
+ */
+export type CommitOnceResult<T> =
+  | { ran: boolean; status: "committed"; value: T }
+  | { ran: boolean; status: "failed"; error: unknown };
+
 /** A function that runs its commit at most once; see {@link createCommitOnce}. */
 export interface CommitOnce<T> {
   /** Run the commit (first call) or join it (every later call). Every caller gets the same promise. */
@@ -640,6 +663,16 @@ export interface CommitOnce<T> {
    * `fn` returns, even for a synchronous `fn`), so read it after awaiting.
    */
   readonly state: CommitOnceState;
+  /**
+   * Like calling the function, but it never rejects and it says whether this
+   * call ran the commit. Resolves to `{ ran, status: 'committed', value }` or
+   * `{ ran, status: 'failed', error }` (the thrown or rejected value as is,
+   * even when falsy). A throwing `fn` is therefore a `failed` result with
+   * `ran: true` on the first call and `ran: false` on every later one, and it
+   * is never run again. It shares the same single run as the plain call, so
+   * mixing the two is safe.
+   */
+  attempt(): Promise<CommitOnceResult<T>>;
 }
 
 /**
@@ -711,6 +744,14 @@ export function createCommitOnce<T>(fn: () => T | PromiseLike<T>): CommitOnce<T>
     }
     return shared;
   };
+  const attempt = (): Promise<CommitOnceResult<T>> => {
+    const ran = shared === undefined; // true only for the call that is about to run fn
+    return commit().then(
+      (value): CommitOnceResult<T> => ({ ran, status: "committed", value }),
+      (error: unknown): CommitOnceResult<T> => ({ ran, status: "failed", error }),
+    );
+  };
   Object.defineProperty(commit, "state", { get: () => state, enumerable: true });
+  Object.defineProperty(commit, "attempt", { value: attempt, enumerable: true });
   return commit as CommitOnce<T>;
 }

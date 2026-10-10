@@ -69,6 +69,26 @@
   `cacheReadPerMillion`.
 - `createCommitOnce` runs `fn` at most once per instance, ever; a failed commit
   rejects for every caller and is not retried.
+  `attempt()` shares that single run, never rejects and reports `ran` (true only
+  for the call that executed `fn`).
+- Amounts are safe integers of micro-dollars. A reserve `amount` or reported
+  `actualAmount` that is `NaN`, infinite, fractional, negative, above 2^53 - 1 or
+  a BigInt is rejected (a reported `-0` is recorded as 0). An actual above the
+  hold is recorded as is and also reported as `overrunAmount` on the result,
+  present only then; the `CapacitySettlement` shape is unchanged.
+- Integer-micro price tables (`definePricingTable` with `...PerMTokMicros`
+  entries; one table uses one shape) hold safe-integer prices, are frozen all
+  the way down, and `priceFor` returns `unknown-model` for any key that is not
+  an own key (never a fallback price). `costMicros` is BigInt arithmetic, rounds
+  up once on the sum, throws for a bucket with tokens and no price, and applies
+  the long-context rates to every bucket or none (no per-bucket fallback to the
+  base tier). Prices and usage are read once.
+- `readAnthropicUsage` and `readOpenAIUsage` never throw: wherever the strict
+  mappers would throw they return `'unknown'`, which settles as
+  `{ usage: 'unknown' }` and keeps the reserved estimate. A cache field that is
+  absent counts as 0; one that is present and malformed is `'unknown'`.
+- `assertPricingFresh` accepts `(table, { now, maxAgeDays })` or the original
+  `(table, now, maxAgeDays)`; `now` always comes from the caller.
 
 ## Set up and verify
 
