@@ -825,6 +825,26 @@ describe('self-hunt: found by attacking the first version', () => {
     expect(long.status === 'unknown' && long.reason.length).toBeLessThan(300);
   });
 
+  it('a thrown error whose message changes between reads cannot get past the cap or the escaping', () => {
+    let reads = 0;
+    const shifty = new Error('x');
+    Object.defineProperty(shifty, 'message', {
+      get() {
+        reads++;
+        return reads < 3 ? 'short' : `bad\n${'z'.repeat(100_000)}`;
+      },
+    });
+    const reading = usageFromAnthropic(
+      new Proxy({}, {
+        ownKeys() {
+          throw shifty;
+        },
+      }),
+    );
+    expect(reading).toEqual({ status: 'unknown', reason: 'short' });
+    expect(reads).toBe(1);
+  });
+
   it('a known reading has exactly status and usage', () => {
     const reading = usageFromAnthropic({ input_tokens: 1, output_tokens: 2 });
     expect(Object.keys(reading).sort()).toEqual(['status', 'usage']);
