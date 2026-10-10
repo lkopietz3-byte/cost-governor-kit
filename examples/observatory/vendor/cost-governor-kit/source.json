@@ -2,25 +2,27 @@
   "schema": "threshold-sdk-source-v1",
   "package": "cost-governor-kit",
   "version": "0.2.1",
-  "revision": "2c2ccae150b3c835a9647b4e3c897e3a89652e67",
-  "sourceDirty": true,
-  "generatedAt": "2026-10-10T19:55:44.979Z",
+  "revision": "7cf1285dbe42061015b1757c95765dd92b2fe394",
+  "sourceDirty": false,
+  "generatedAt": "2026-10-10T21:15:39.961Z",
   "compiler": "typescript 5.9.3",
   "method": "Fresh ES2022 module transpilation from the owning src; no dist cache.",
   "sources": {
-    "src/index.ts": "d4d3beef981e59165c3910fe00ca5d2a72b943daf8ccfbf7fe8811495d4c5824",
+    "src/index.ts": "bedbc7247f12687cff1b22c497a786825a20c4e100751ba2e36718b4f764e8d3",
     "src/internal.ts": "f054453220f6b39efc2528b1eed81209147162a82fdabaf43300cd38598c563f",
-    "src/pricing.ts": "4210953ebbfa6ec5b1616137089c645d4fde22f429cf23bbeb5105a0042b1f57",
+    "src/pricing.ts": "45df1f7e3c0f72abf6267667634de4157777d8e6c05db28e3ce4693db988b4f4",
     "src/preCallCeiling.ts": "531b71b0e502fe7589c41f9f9b68d457c53f799e695f21433d0445a1a9439051",
-    "src/reserveConfirm.ts": "c1d991da0ffb14304bfe20f4d87577428b258ba13c050bf9ea7b0fa89b9c5989",
+    "src/reserveConfirm.ts": "a10a3810ed36ef0ea47f1458ad75758ea3685c547b2a2a2d41fca7236c4b0ecd",
+    "src/admission.ts": "9907ec6f3a0254beed2aca41b52a05e33ba8f3a634ce07b1cd60fc4a507bdbf6",
     "LICENSE": "07605f7cd19dfee07729db4294313d725e3a0ea61c77056c0ebe53669c274cf3"
   },
   "outputs": {
-    "index.js": "48a5e54a57d0bb8e0f59f8e028d32b1c8b9152f92d4be8f21e8de614b86c0663",
+    "index.js": "d9aaf550afb07837f702bc4bf40e313931e9be3126b43d52cb00c7fa00b157ba",
     "internal.js": "40671c6ab02fb207e77b4a21d03bb776043218949f9fbcfa5b06e1e9d3748b46",
-    "pricing.js": "87111d82e77db0e7651c5a2b23483881b231e3c8ea56073202b85004e7174972",
+    "pricing.js": "4d792d6d6a911b891c21bc2af23412db1a70c624a92daa0804cc40c501a2a315",
     "preCallCeiling.js": "87ee976e6bd65230eadfed0e7f7fb3d22706597377944a16eac3a85f6388d3b2",
-    "reserveConfirm.js": "f05b66feceb64277d23e15126aa6e48d3a90f507e3a0232f5cd39d0736b40427",
+    "reserveConfirm.js": "3ab45dfde8865977b1c9132137e6cb9cb9b4d15a43bab17481264c12f945f316",
+    "admission.js": "edfa48e70b0d32821f566fa73791834d574e658311109e53293d997b32aeeb94",
     "LICENSE": "07605f7cd19dfee07729db4294313d725e3a0ea61c77056c0ebe53669c274cf3"
   }
 }
