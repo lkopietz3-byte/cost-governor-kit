@@ -44,8 +44,8 @@ export interface MicrosPrice extends MicrosRates {
   longContext?: LongContextRates;
 }
 
-/** Input to `definePricingTable` for integer-micro entries. */
-export interface MicrosPricingTableDefinition {
+/** Input to `definePricingTable`. */
+export interface PricingTableDefinition {
   /** When these prices were last checked: a UTC date `YYYY-MM-DD` or a strict ISO-8601 date-time with a zone. */
   checkedAt: string;
   /** Where the prices came from, for example the provider's pricing page URL. Non-blank. */
@@ -54,8 +54,8 @@ export interface MicrosPricingTableDefinition {
   rates: Record<string, MicrosPrice>;
 }
 
-/** A validated, deeply frozen table returned by `definePricingTable` for integer-micro entries. */
-export interface MicrosPricingTable {
+/** A validated, deeply frozen table returned by `definePricingTable`. */
+export interface DatedPricingTable {
   readonly checkedAt: string;
   readonly source: string;
   readonly rates: Readonly<Record<string, Readonly<MicrosPrice>>>;
@@ -75,12 +75,6 @@ const RATE_FIELDS = [
 ] as const;
 const REQUIRED_RATE_FIELDS: ReadonlyArray<(typeof RATE_FIELDS)[number]> = ['inputPerMTokMicros', 'outputPerMTokMicros'];
 const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER);
-
-/** Whether a table entry is written in the integer-micro shape (as opposed to the older per-million USD shape). */
-export function isMicrosShaped(entry: unknown): boolean {
-  if (!isPlainRecord(entry)) return false;
-  return Reflect.ownKeys(entry).some((k) => typeof k === 'string' && (k.endsWith('PerMTokMicros') || k === 'longContext'));
-}
 
 function readRate(fn: string, where: string, field: string, value: unknown, required: boolean): number | undefined {
   if (value === undefined) {
@@ -157,7 +151,7 @@ export function buildMicrosRates(fn: string, entries: ReadonlyArray<readonly [st
  * @throws TypeError when `table` or its `rates` is not a plain object, or the
  *   entry is not an integer-micro price; RangeError for an invalid rate.
  */
-export function priceFor(table: MicrosPricingTable, key: string): PriceLookup {
+export function priceFor(table: DatedPricingTable, key: string): PriceLookup {
   const fn = 'priceFor';
   if (!isPlainRecord(table)) {
     throw new TypeError(`${fn}: table must come from definePricingTable`);
@@ -226,16 +220,16 @@ function readTokens(fn: string, usage: unknown): Record<(typeof USAGE_FIELDS)[nu
  * not price throws; it does not fall back to the base tier.
  *
  * Each field of `usage` and `price` is read once. Usage must be known token
- * counts: pass the result of `readAnthropicUsage` or `readOpenAIUsage` only
- * after checking it is not `'unknown'`.
+ * counts: pass the `usage` of a `usageFromAnthropic` or `usageFromOpenAI` reading
+ * only after checking its `status` is `'known'`.
  *
  * @throws TypeError for a usage or price of the wrong type or shape (including
- *   the string `'unknown'`, an unknown field, a BigInt or a string count);
+ *   the string `'unknown'` or a whole reading object, an unknown field, a BigInt or a string count);
  *   RangeError for a count or rate that is not a non-negative safe integer, a
  *   bucket with tokens and no price, or a cost beyond the safe-integer range.
  */
-export function costMicros(usage: UsageTokens, price: MicrosPrice): number {
-  const fn = 'costMicros';
+export function estimateCostMicros(usage: UsageTokens, price: MicrosPrice): number {
+  const fn = 'estimateCostMicros';
   const tokens = readTokens(fn, usage);
   const p = readMicrosPrice(fn, 'price', price);
   const prompt = tokens.inputTokens + tokens.cacheReadTokens + tokens.cacheCreation5mTokens + tokens.cacheCreation1hTokens;

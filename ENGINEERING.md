@@ -63,10 +63,6 @@
   `confirmReservation` call are exactly as before (one argument). With it, a
   missing or `{ usage: 'unknown' }` settle records the full estimate, never 0,
   and a malformed settle is `work_outcome_ambiguous` with the hold kept.
-- `estimateCostMicros` rounds up (after snapping floating-point noise within a
-  relative 1e-12, at most 1e-6 micro-dollars), and a positive cost is never 0. Provider mappers and dated pricing tables throw on unknown
-  keys; `lookupRatesOrThrow` has no fallback price; a dated table requires
-  `cacheReadPerMillion`.
 - `createCommitOnce` runs `fn` at most once per instance, ever; a failed commit
   rejects for every caller and is not retried.
   `attempt()` shares that single run, never rejects and reports `ran` (true only
@@ -76,19 +72,28 @@
   a BigInt is rejected (a reported `-0` is recorded as 0). An actual above the
   hold is recorded as is and also reported as `overrunAmount` on the result,
   present only then; the `CapacitySettlement` shape is unchanged.
-- Integer-micro price tables (`definePricingTable` with `...PerMTokMicros`
-  entries; one table uses one shape) hold safe-integer prices, are frozen all
-  the way down, and `priceFor` returns `unknown-model` for any key that is not
-  an own key (never a fallback price). `costMicros` is BigInt arithmetic, rounds
-  up once on the sum, throws for a bucket with tokens and no price, and applies
-  the long-context rates to every bucket or none (no per-bucket fallback to the
-  base tier). Prices and usage are read once.
-- `readAnthropicUsage` and `readOpenAIUsage` never throw: wherever the strict
-  mappers would throw they return `'unknown'`, which settles as
-  `{ usage: 'unknown' }` and keeps the reserved estimate. A cache field that is
-  absent counts as 0; one that is present and malformed is `'unknown'`.
-- `assertPricingFresh` accepts `(table, { now, maxAgeDays })` or the original
-  `(table, now, maxAgeDays)`; `now` always comes from the caller.
+- Dated pricing tables (`definePricingTable`) hold integer-micro prices: each
+  entry is `{ inputPerMTokMicros, outputPerMTokMicros, cacheWritePerMTokMicros?,
+  cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?, longContext? }`, every
+  price a safe integer (a `-0` reads as 0; a BigInt, fraction or value above
+  2^53 - 1 is rejected). The table is frozen all the way down. `priceFor`
+  returns `{ status: 'unknown-model' }` for any key that is not an own key and
+  never a fallback price. `estimateCostMicros(usage, price)` is BigInt
+  arithmetic, rounds up once on the sum, throws for a bucket with tokens and no
+  price, and applies the long-context prices to every bucket or none (no
+  per-bucket fallback to the base tier). Prices and usage are read once, and
+  only own properties are ever read, so a polluted `Object.prototype` supplies
+  nothing.
+- `usageFromAnthropic` and `usageFromOpenAI` never throw: they return
+  `{ status: 'known', usage }` or `{ status: 'unknown', reason }`, where the
+  reason is escaped and capped. Wherever the response cannot be read exactly
+  (missing usage, a non-number or non-integer count, an unrecognized field, a
+  total that disagrees with its split, a hostile getter or Proxy) the reading is
+  unknown, which settles as `{ usage: 'unknown' }` and keeps the reserved
+  estimate, never zero. A cache field that is absent counts as 0; one that is
+  present and malformed is unknown.
+- `assertPricingFresh(table, { now, maxAgeDays })` is the only signature; `now`
+  always comes from the caller, and any other options key is rejected.
 
 ## Set up and verify
 

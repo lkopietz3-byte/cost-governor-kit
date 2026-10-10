@@ -15,16 +15,18 @@ import vm from 'node:vm';
 import { describe, expect, it } from 'vitest';
 import {
   assertPricingFresh,
-  costMicros,
+  estimateCostMicros,
   createCommitOnce,
   definePricingTable,
   priceFor,
-  readAnthropicUsage,
-  readOpenAIUsage,
+  usageFromAnthropic,
+  usageFromOpenAI,
   withCapacityReservation,
   type CapacityReservationLedger,
   type CapacityWorkOutcome,
   type MicrosPrice,
+  type UsageReading,
+  type UsageTokens,
   type ReserveCapacityRequest,
 } from '../src/index.js';
 
@@ -72,6 +74,13 @@ async function reserveWith(settle: unknown, hasSettle = true) {
   });
   return { log, result };
 }
+
+/** Counts if the reading is known, else the string 'unknown' (so rows read like the settle decision). */
+function countsOrUnknown(reading: UsageReading): UsageTokens | 'unknown' {
+  return reading.status === 'known' ? reading.usage : 'unknown';
+}
+const anthropic = (usage: unknown) => countsOrUnknown(usageFromAnthropic(usage));
+const openai = (usage: unknown) => countsOrUnknown(usageFromOpenAI(usage));
 
 // Illustrative, made-up prices in micro-dollars per million tokens.
 const price: MicrosPrice = {
@@ -148,34 +157,34 @@ describe('verdict table: amounts, pricing, commit-once', () => {
 
   it('V6 an OpenAI response missing usage gives unknown, not zero', () => {
     const response = JSON.parse('{"id":"chatcmpl-1","choices":[]}') as { usage?: unknown };
-    expect(readOpenAIUsage(response.usage)).toBe('unknown');
-    expect(readOpenAIUsage(undefined)).toBe('unknown');
-    expect(readOpenAIUsage(null)).toBe('unknown');
-    expect(readOpenAIUsage({})).toBe('unknown');
+    expect(openai(response.usage)).toBe('unknown');
+    expect(openai(undefined)).toBe('unknown');
+    expect(openai(null)).toBe('unknown');
+    expect(openai({})).toBe('unknown');
   });
 
   it('V7 a string "123" token count gives unknown', () => {
-    expect(readOpenAIUsage({ prompt_tokens: '123', completion_tokens: 5 })).toBe('unknown');
-    expect(readOpenAIUsage({ prompt_tokens: 123, completion_tokens: '5' })).toBe('unknown');
-    expect(readAnthropicUsage({ input_tokens: '123', output_tokens: 5 })).toBe('unknown');
-    expect(readAnthropicUsage({ input_tokens: 123, output_tokens: 5, cache_read_input_tokens: '1' })).toBe('unknown');
-    expect(readAnthropicUsage({ input_tokens: 123, output_tokens: 5, cache_creation_input_tokens: '1' })).toBe('unknown');
-    expect(readAnthropicUsage({ ...anthropicUsage, cache_creation: { ephemeral_5m_input_tokens: '51', ephemeral_1h_input_tokens: 2_000 } })).toBe('unknown');
+    expect(openai({ prompt_tokens: '123', completion_tokens: 5 })).toBe('unknown');
+    expect(openai({ prompt_tokens: 123, completion_tokens: '5' })).toBe('unknown');
+    expect(anthropic({ input_tokens: '123', output_tokens: 5 })).toBe('unknown');
+    expect(anthropic({ input_tokens: 123, output_tokens: 5, cache_read_input_tokens: '1' })).toBe('unknown');
+    expect(anthropic({ input_tokens: 123, output_tokens: 5, cache_creation_input_tokens: '1' })).toBe('unknown');
+    expect(anthropic({ ...anthropicUsage, cache_creation: { ephemeral_5m_input_tokens: '51', ephemeral_1h_input_tokens: 2_000 } })).toBe('unknown');
   });
 
   it('V8 cache tokens are priced, each bucket at its own rate', () => {
-    const usage = readAnthropicUsage(anthropicUsage);
+    const usage = anthropic(anthropicUsage);
     expect(usage).toEqual({ inputTokens: 2_095, outputTokens: 503, cacheReadTokens: 12, cacheCreation5mTokens: 51, cacheCreation1hTokens: 2_000 });
     if (usage === 'unknown') throw new Error('unreachable');
     // 6,285 + 7,545 + 3.6 + 191.25 + 12,000 = 26,024.85 micro-dollars, rounded up.
-    expect(costMicros(usage, price)).toBe(26_025);
-    expect(costMicros({ cacheReadTokens: 1_000_000 }, price)).toBe(300_000);
-    expect(costMicros({ cacheCreation5mTokens: 1_000_000 }, price)).toBe(3_750_000);
-    expect(costMicros({ cacheCreation1hTokens: 1_000_000 }, price)).toBe(6_000_000);
+    expect(estimateCostMicros(usage, price)).toBe(26_025);
+    expect(estimateCostMicros({ cacheReadTokens: 1_000_000 }, price)).toBe(300_000);
+    expect(estimateCostMicros({ cacheCreation5mTokens: 1_000_000 }, price)).toBe(3_750_000);
+    expect(estimateCostMicros({ cacheCreation1hTokens: 1_000_000 }, price)).toBe(6_000_000);
   });
 
   it('V8b a missing cache_creation object does not drop cache_creation_input_tokens', () => {
-    expect(readAnthropicUsage({ input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 700 })).toEqual({
+    expect(anthropic({ input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 700 })).toEqual({
       inputTokens: 10,
       outputTokens: 5,
       cacheReadTokens: 0,
@@ -317,7 +326,7 @@ describe('hostile inputs', () => {
         return Reflect.get(t, prop, receiver) as unknown;
       },
     });
-    expect(readAnthropicUsage(proxy)).toEqual({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreation5mTokens: 0, cacheCreation1hTokens: 0 });
+    expect(anthropic(proxy)).toEqual({ inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreation5mTokens: 0, cacheCreation1hTokens: 0 });
     expect(Object.keys(reads).length).toBeGreaterThan(0);
     for (const [field, count] of Object.entries(reads)) expect([field, count]).toEqual([field, 1]);
     const hostile = new Proxy(target, {
@@ -325,16 +334,16 @@ describe('hostile inputs', () => {
         throw new Error('trap');
       },
     });
-    expect(readAnthropicUsage(hostile)).toBe('unknown');
+    expect(anthropic(hostile)).toBe('unknown');
     const noKeys = new Proxy(target, {
       ownKeys() {
         throw new Error('trap');
       },
     });
-    expect(readOpenAIUsage(noKeys)).toBe('unknown');
+    expect(openai(noKeys)).toBe('unknown');
     const { proxy: revoked, revoke } = Proxy.revocable({}, {});
     revoke();
-    expect(readAnthropicUsage(revoked)).toBe('unknown');
+    expect(anthropic(revoked)).toBe('unknown');
   });
 
   it('a getter that answers differently the second time cannot change the reading', () => {
@@ -347,7 +356,7 @@ describe('hostile inputs', () => {
         return reads === 1 ? 100 : -1;
       },
     });
-    expect(readAnthropicUsage(usage)).toMatchObject({ inputTokens: 100 });
+    expect(anthropic(usage)).toMatchObject({ inputTokens: 100 });
     expect(reads).toBe(1);
   });
 
@@ -361,36 +370,36 @@ describe('hostile inputs', () => {
     ['null input', null],
     ['an array', []],
   ])('a token count of %s is unknown', (_label, bad) => {
-    expect(readAnthropicUsage({ input_tokens: bad, output_tokens: 1 })).toBe('unknown');
-    expect(readOpenAIUsage({ prompt_tokens: bad, completion_tokens: 1 })).toBe('unknown');
-    expect(readOpenAIUsage({ input_tokens: bad, output_tokens: 1 })).toBe('unknown');
+    expect(anthropic({ input_tokens: bad, output_tokens: 1 })).toBe('unknown');
+    expect(openai({ prompt_tokens: bad, completion_tokens: 1 })).toBe('unknown');
+    expect(openai({ input_tokens: bad, output_tokens: 1 })).toBe('unknown');
   });
 
   it('a token count of -0 reads as +0', () => {
-    const usage = readAnthropicUsage({ input_tokens: -0, output_tokens: 1 });
+    const usage = anthropic({ input_tokens: -0, output_tokens: 1 });
     if (usage === 'unknown') throw new Error('expected a reading');
     expect(Object.is(usage.inputTokens, 0)).toBe(true);
   });
 
   it('a field the readers do not know is unknown, so the estimate is kept', () => {
-    expect(readAnthropicUsage({ ...anthropicUsage, new_billed_bucket: 5 })).toBe('unknown');
-    expect(readOpenAIUsage({ prompt_tokens: 5, completion_tokens: 1, new_billed_bucket: 5 })).toBe('unknown');
+    expect(anthropic({ ...anthropicUsage, new_billed_bucket: 5 })).toBe('unknown');
+    expect(openai({ prompt_tokens: 5, completion_tokens: 1, new_billed_bucket: 5 })).toBe('unknown');
   });
 
   it('a non-object usage is unknown', () => {
     for (const bad of ['usage', 5, true, Symbol('s'), () => 1, new Map(), [], new Date()]) {
-      expect(readAnthropicUsage(bad)).toBe('unknown');
-      expect(readOpenAIUsage(bad)).toBe('unknown');
+      expect(anthropic(bad)).toBe('unknown');
+      expect(openai(bad)).toBe('unknown');
     }
   });
 
   it('OpenAI cached tokens are split out of the prompt, both shapes', () => {
-    expect(readOpenAIUsage({ prompt_tokens: 1_000, completion_tokens: 50, total_tokens: 1_050, prompt_tokens_details: { cached_tokens: 400 } })).toEqual({
+    expect(openai({ prompt_tokens: 1_000, completion_tokens: 50, total_tokens: 1_050, prompt_tokens_details: { cached_tokens: 400 } })).toEqual({
       inputTokens: 600,
       outputTokens: 50,
       cacheReadTokens: 400,
     });
-    expect(readOpenAIUsage({ input_tokens: 1_000, output_tokens: 50, input_tokens_details: { cached_tokens: 400 } })).toEqual({
+    expect(openai({ input_tokens: 1_000, output_tokens: 50, input_tokens_details: { cached_tokens: 400 } })).toEqual({
       inputTokens: 600,
       outputTokens: 50,
       cacheReadTokens: 400,
@@ -412,7 +421,7 @@ describe('hostile inputs', () => {
       ['null', null, TypeError],
     ])('a rate of %s is rejected', (_label, bad, ErrorType) => {
       for (const field of ['inputPerMTokMicros', 'outputPerMTokMicros', 'cacheReadPerMTokMicros', 'cacheWritePerMTokMicros', 'cacheWrite1hPerMTokMicros']) {
-        expect(() => definePricingTable({ ...base, rates: { 'a:b': { ...okRates, [field]: bad } } } as never)).toThrow(ErrorType);
+        expect(() => definePricingTable({ ...base, rates: { 'a:b': { ...okRates, [field]: bad } } })).toThrow(ErrorType);
       }
     });
 
@@ -428,11 +437,6 @@ describe('hostile inputs', () => {
       expect(() => definePricingTable({ ...base, rates: { 'a:b': { ...okRates, cacheWritePerMillion: 1 } } } as never)).toThrow(/unknown field/);
     });
 
-    it('rejects a table that mixes the two entry shapes', () => {
-      expect(() =>
-        definePricingTable({ ...base, rates: { 'a:b': okRates, 'a:c': { inputPerMillion: 1, outputPerMillion: 2, cacheReadPerMillion: 0.1 } } } as never),
-      ).toThrow(RangeError);
-    });
 
     it('returns a deeply frozen copy that later edits of the input cannot change', () => {
       const input = { ...okRates, longContext: { aboveInputTokens: 200_000, inputPerMTokMicros: 3, outputPerMTokMicros: 4 } };
@@ -492,9 +496,7 @@ describe('hostile inputs', () => {
     it('priceFor on a malformed table throws instead of returning a price', () => {
       expect(() => priceFor(null as never, 'a:b')).toThrow(TypeError);
       expect(() => priceFor({ checkedAt: '2026-10-01', source: 's', rates: [] } as never, 'a:b')).toThrow(TypeError);
-      // A table in the older per-million shape is not a micros table.
-      const legacy = definePricingTable({ checkedAt: '2026-10-01', source: 's', rates: { 'a:b': { inputPerMillion: 1, outputPerMillion: 2, cacheReadPerMillion: 0.1 } } });
-      expect(() => priceFor(legacy as never, 'a:b')).toThrow(TypeError);
+      expect(() => priceFor({ checkedAt: '2026-10-01', source: 's', rates: { 'a:b': { inputPerMillion: 1, outputPerMillion: 2 } } } as never, 'a:b')).toThrow(TypeError);
     });
   });
 
@@ -517,13 +519,14 @@ describe('hostile inputs', () => {
     ])('maxAgeDays %s is rejected (never read as "no limit")', (_label, maxAgeDays) => {
       expect(() => assertPricingFresh(table, { now, maxAgeDays })).toThrow(RangeError);
     });
-    it('rejects a missing or invalid now, a non-number maxAgeDays and extra keys', () => {
+    it('rejects a missing or invalid now, a non-number maxAgeDays, extra keys and a bare Date', () => {
       expect(() => assertPricingFresh(table, { maxAgeDays: 30 } as never)).toThrow(TypeError);
       expect(() => assertPricingFresh(table, { now: '2026-10-10', maxAgeDays: 30 } as never)).toThrow(TypeError);
       expect(() => assertPricingFresh(table, { now: new Date(Number.NaN), maxAgeDays: 30 })).toThrow(RangeError);
       expect(() => assertPricingFresh(table, { now, maxAgeDays: '30' } as never)).toThrow(TypeError);
       expect(() => assertPricingFresh(table, { now, maxAgeDays: 30, extra: 1 } as never)).toThrow(TypeError);
       expect(() => assertPricingFresh(table, null as never)).toThrow(TypeError);
+      expect(() => assertPricingFresh(table, now as never)).toThrow(TypeError);
     });
     it('options getters are read once', () => {
       let reads = 0;
@@ -538,38 +541,34 @@ describe('hostile inputs', () => {
       expect(() => assertPricingFresh(table, options as never)).not.toThrow();
       expect(reads).toBe(1);
     });
-    it('the older (table, Date, number) form still works', () => {
-      expect(() => assertPricingFresh(table, new Date('2026-10-10T12:00:00Z'), 30)).not.toThrow();
-      expect(() => assertPricingFresh(table, new Date('2027-10-10T12:00:00Z'), 30)).toThrow(/days old/);
-    });
   });
 
-  describe('costMicros', () => {
+  describe('estimateCostMicros', () => {
     it('is exact integer math: rounds up once on the sum, never below the true cost', () => {
       // 1 input token at 500,000 micros per million = 0.5 micro; plus 1 output token at 500,000 = 0.5 micro; sum 1.
       const half: MicrosPrice = { inputPerMTokMicros: 500_000, outputPerMTokMicros: 500_000 };
-      expect(costMicros({ inputTokens: 1, outputTokens: 1 }, half)).toBe(1);
-      expect(costMicros({ inputTokens: 1 }, half)).toBe(1);
-      expect(costMicros({ inputTokens: 3 }, half)).toBe(2);
-      expect(costMicros({}, half)).toBe(0);
-      expect(costMicros({ inputTokens: 0, outputTokens: 0 }, half)).toBe(0);
+      expect(estimateCostMicros({ inputTokens: 1, outputTokens: 1 }, half)).toBe(1);
+      expect(estimateCostMicros({ inputTokens: 1 }, half)).toBe(1);
+      expect(estimateCostMicros({ inputTokens: 3 }, half)).toBe(2);
+      expect(estimateCostMicros({}, half)).toBe(0);
+      expect(estimateCostMicros({ inputTokens: 0, outputTokens: 0 }, half)).toBe(0);
       // 7 tokens at 100,000 micros per million = 0.7 micro; the answer is 1.
-      expect(costMicros({ inputTokens: 7 }, { inputPerMTokMicros: 100_000, outputPerMTokMicros: 0 })).toBe(1);
+      expect(estimateCostMicros({ inputTokens: 7 }, { inputPerMTokMicros: 100_000, outputPerMTokMicros: 0 })).toBe(1);
       // Exact multiples are not bumped by noise.
-      expect(costMicros({ inputTokens: 3_000_000 }, { inputPerMTokMicros: 100_000, outputPerMTokMicros: 0 })).toBe(300_000);
+      expect(estimateCostMicros({ inputTokens: 3_000_000 }, { inputPerMTokMicros: 100_000, outputPerMTokMicros: 0 })).toBe(300_000);
     });
 
     it('a zero rate costs 0; a positive rate never rounds a used bucket to 0', () => {
-      expect(costMicros({ inputTokens: 1_000 }, { inputPerMTokMicros: 0, outputPerMTokMicros: 0 })).toBe(0);
-      expect(costMicros({ inputTokens: 1 }, { inputPerMTokMicros: 1, outputPerMTokMicros: 0 })).toBe(1);
+      expect(estimateCostMicros({ inputTokens: 1_000 }, { inputPerMTokMicros: 0, outputPerMTokMicros: 0 })).toBe(0);
+      expect(estimateCostMicros({ inputTokens: 1 }, { inputPerMTokMicros: 1, outputPerMTokMicros: 0 })).toBe(1);
     });
 
     it('a bucket with tokens and no configured price throws: no fallback multiplier, no zero', () => {
       const bare: MicrosPrice = { inputPerMTokMicros: 1, outputPerMTokMicros: 2 };
-      expect(() => costMicros({ cacheReadTokens: 1 }, bare)).toThrow(RangeError);
-      expect(() => costMicros({ cacheCreation5mTokens: 1 }, bare)).toThrow(RangeError);
-      expect(() => costMicros({ cacheCreation1hTokens: 1 }, bare)).toThrow(RangeError);
-      expect(costMicros({ cacheReadTokens: 0, cacheCreation5mTokens: 0, cacheCreation1hTokens: 0 }, bare)).toBe(0);
+      expect(() => estimateCostMicros({ cacheReadTokens: 1 }, bare)).toThrow(RangeError);
+      expect(() => estimateCostMicros({ cacheCreation5mTokens: 1 }, bare)).toThrow(RangeError);
+      expect(() => estimateCostMicros({ cacheCreation1hTokens: 1 }, bare)).toThrow(RangeError);
+      expect(estimateCostMicros({ cacheReadTokens: 0, cacheCreation5mTokens: 0, cacheCreation1hTokens: 0 }, bare)).toBe(0);
     });
 
     it('long context: above the threshold the long rates apply to every bucket; at the threshold the base rates do', () => {
@@ -579,34 +578,34 @@ describe('hostile inputs', () => {
         cacheReadPerMTokMicros: 300_000,
         longContext: { aboveInputTokens: 200_000, inputPerMTokMicros: 6_000_000, outputPerMTokMicros: 22_500_000, cacheReadPerMTokMicros: 600_000 },
       };
-      expect(costMicros({ inputTokens: 200_000, outputTokens: 1_000 }, lc)).toBe(600_000 + 15_000);
-      expect(costMicros({ inputTokens: 200_001, outputTokens: 1_000 }, lc)).toBe(1_200_006 + 22_500);
+      expect(estimateCostMicros({ inputTokens: 200_000, outputTokens: 1_000 }, lc)).toBe(600_000 + 15_000);
+      expect(estimateCostMicros({ inputTokens: 200_001, outputTokens: 1_000 }, lc)).toBe(1_200_006 + 22_500);
       // Cache reads count toward the prompt size: 600,000 + 60,000.6 rounds up to 660,001.
-      expect(costMicros({ inputTokens: 100_000, cacheReadTokens: 100_001 }, lc)).toBe(660_001);
+      expect(estimateCostMicros({ inputTokens: 100_000, cacheReadTokens: 100_001 }, lc)).toBe(660_001);
       // The long tier lacks a cache-write price: a write there is unpriceable, not borrowed from the base tier.
-      expect(() => costMicros({ inputTokens: 200_001, cacheCreation5mTokens: 1 }, { ...lc, cacheWritePerMTokMicros: 1 })).toThrow(RangeError);
+      expect(() => estimateCostMicros({ inputTokens: 200_001, cacheCreation5mTokens: 1 }, { ...lc, cacheWritePerMTokMicros: 1 })).toThrow(RangeError);
     });
 
     it('does not lose precision at large counts and refuses a result past the safe-integer range', () => {
-      expect(costMicros({ inputTokens: 9_007_199_254_740_991 }, { inputPerMTokMicros: 1_000_000, outputPerMTokMicros: 0 })).toBe(9_007_199_254_740_991);
-      expect(() => costMicros({ inputTokens: 9_007_199_254_740_991 }, { inputPerMTokMicros: 2_000_000, outputPerMTokMicros: 0 })).toThrow(RangeError);
-      expect(costMicros({ inputTokens: 9_007_199_254_740_991 }, { inputPerMTokMicros: 1, outputPerMTokMicros: 0 })).toBe(9_007_199_255);
+      expect(estimateCostMicros({ inputTokens: 9_007_199_254_740_991 }, { inputPerMTokMicros: 1_000_000, outputPerMTokMicros: 0 })).toBe(9_007_199_254_740_991);
+      expect(() => estimateCostMicros({ inputTokens: 9_007_199_254_740_991 }, { inputPerMTokMicros: 2_000_000, outputPerMTokMicros: 0 })).toThrow(RangeError);
+      expect(estimateCostMicros({ inputTokens: 9_007_199_254_740_991 }, { inputPerMTokMicros: 1, outputPerMTokMicros: 0 })).toBe(9_007_199_255);
     });
 
     it('rejects bad usage: unknown keys, non-integers, NaN, Infinity, strings, "unknown", non-objects', () => {
-      expect(() => costMicros({ input_tokens: 5 } as never, price)).toThrow(TypeError);
-      expect(() => costMicros({ inputTokens: 1.5 }, price)).toThrow(RangeError);
-      expect(() => costMicros({ inputTokens: Number.NaN }, price)).toThrow(RangeError);
-      expect(() => costMicros({ inputTokens: Number.POSITIVE_INFINITY }, price)).toThrow(RangeError);
-      expect(() => costMicros({ inputTokens: -1 }, price)).toThrow(RangeError);
-      expect(() => costMicros({ inputTokens: 2 ** 53 }, price)).toThrow(RangeError);
-      expect(() => costMicros({ inputTokens: '123' } as never, price)).toThrow(TypeError);
-      expect(() => costMicros({ inputTokens: 5n } as never, price)).toThrow(TypeError);
-      expect(() => costMicros('unknown' as never, price)).toThrow(TypeError);
-      expect(() => costMicros(null as never, price)).toThrow(TypeError);
-      expect(() => costMicros(new Map() as never, price)).toThrow(TypeError);
-      expect(() => costMicros({}, null as never)).toThrow(TypeError);
-      expect(() => costMicros({}, { inputPerMTokMicros: Number.NaN, outputPerMTokMicros: 1 })).toThrow(RangeError);
+      expect(() => estimateCostMicros({ input_tokens: 5 } as never, price)).toThrow(TypeError);
+      expect(() => estimateCostMicros({ inputTokens: 1.5 }, price)).toThrow(RangeError);
+      expect(() => estimateCostMicros({ inputTokens: Number.NaN }, price)).toThrow(RangeError);
+      expect(() => estimateCostMicros({ inputTokens: Number.POSITIVE_INFINITY }, price)).toThrow(RangeError);
+      expect(() => estimateCostMicros({ inputTokens: -1 }, price)).toThrow(RangeError);
+      expect(() => estimateCostMicros({ inputTokens: 2 ** 53 }, price)).toThrow(RangeError);
+      expect(() => estimateCostMicros({ inputTokens: '123' } as never, price)).toThrow(TypeError);
+      expect(() => estimateCostMicros({ inputTokens: 5n } as never, price)).toThrow(TypeError);
+      expect(() => estimateCostMicros('unknown' as never, price)).toThrow(TypeError);
+      expect(() => estimateCostMicros(null as never, price)).toThrow(TypeError);
+      expect(() => estimateCostMicros(new Map() as never, price)).toThrow(TypeError);
+      expect(() => estimateCostMicros({}, null as never)).toThrow(TypeError);
+      expect(() => estimateCostMicros({}, { inputPerMTokMicros: Number.NaN, outputPerMTokMicros: 1 })).toThrow(RangeError);
     });
 
     it('usage and price getters are read once', () => {
@@ -628,7 +627,7 @@ describe('hostile inputs', () => {
           return priceReads === 1 ? 2 : 999;
         },
       });
-      expect(costMicros(usage, p as never)).toBe(2);
+      expect(estimateCostMicros(usage, p as never)).toBe(2);
       expect(usageReads).toBe(1);
       expect(priceReads).toBe(1);
     });
@@ -639,7 +638,7 @@ describe('hostile inputs', () => {
           throw new Error('trap');
         },
       });
-      expect(() => costMicros(hostile, price)).toThrow();
+      expect(() => estimateCostMicros(hostile, price)).toThrow();
     });
   });
 
@@ -712,11 +711,11 @@ describe('flow: provider usage to a settled amount', () => {
   async function run(responseUsage: unknown): Promise<unknown[][]> {
     const log = newLog();
     await withCapacityReservation(ledger(log), { ...req, amount: 40_000 }, async () => {
-      const reading = readAnthropicUsage(responseUsage);
+      const reading = anthropic(responseUsage);
       return {
         status: 'succeeded' as const,
         value: 'reply',
-        settle: reading === 'unknown' ? ({ usage: 'unknown' } as const) : { actualAmount: costMicros(reading, flowPrice) },
+        settle: reading === 'unknown' ? ({ usage: 'unknown' } as const) : { actualAmount: estimateCostMicros(reading, flowPrice) },
       };
     });
     return log.confirms;
@@ -738,10 +737,6 @@ describe('flow: provider usage to a settled amount', () => {
 // ---------------------------------------------------------------------------
 
 describe('self-hunt: found by attacking the first version', () => {
-  it('assertPricingFresh: a maxAgeDays passed beside an options object is rejected, not ignored', () => {
-    const now = new Date('2026-10-10T00:00:00Z');
-    expect(() => (assertPricingFresh as (t: unknown, o: unknown, n: unknown) => void)(table, { now, maxAgeDays: 30 }, 1)).toThrow(TypeError);
-  });
 
   it('assertPricingFresh: a class instance or symbol-keyed options object is not read as options', () => {
     class Opts {
@@ -749,22 +744,22 @@ describe('self-hunt: found by attacking the first version', () => {
       maxAgeDays = 30;
     }
     expect(() => assertPricingFresh(table, new Opts() as never)).toThrow(TypeError);
-    expect(() => assertPricingFresh(table, { now: new Date('2026-10-10T00:00:00Z'), maxAgeDays: 30, [Symbol('x')]: 1 } as never)).toThrow(TypeError);
+    expect(() => assertPricingFresh(table, { now: new Date('2026-10-10T00:00:00Z'), maxAgeDays: 30, [Symbol('x')]: 1 })).toThrow(TypeError);
   });
 
   it('usage with an own __proto__ key (from JSON) is unknown, not priced', () => {
     const usage = JSON.parse('{"input_tokens":5,"output_tokens":1,"__proto__":{"input_tokens":1}}') as unknown;
-    expect(readAnthropicUsage(usage)).toBe('unknown');
-    expect(() => costMicros(JSON.parse('{"inputTokens":5,"__proto__":{}}') as never, price)).toThrow(TypeError);
+    expect(anthropic(usage)).toBe('unknown');
+    expect(() => estimateCostMicros(JSON.parse('{"inputTokens":5,"__proto__":{}}') as never, price)).toThrow(TypeError);
   });
 
   it('a null-prototype usage and a null-prototype price are accepted', () => {
     const usage = Object.assign(Object.create(null) as object, { inputTokens: 2_000_000 });
     const p = Object.assign(Object.create(null) as object, { inputPerMTokMicros: 1_500_000, outputPerMTokMicros: 0 });
-    expect(costMicros(usage, p as MicrosPrice)).toBe(3_000_000);
+    expect(estimateCostMicros(usage, p as MicrosPrice)).toBe(3_000_000);
   });
 
-  it('costMicros matches an independent integer reference on random inputs, and never undercounts', () => {
+  it('estimateCostMicros matches an independent integer reference on random inputs, and never undercounts', () => {
     let seed = 12345;
     const next = (max: number): number => {
       seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
@@ -787,7 +782,7 @@ describe('self-hunt: found by attacking the first version', () => {
         usage.cacheCreation1hTokens * (p.cacheWrite1hPerMTokMicros ?? 0);
       expect(total).toBeLessThan(1e15); // exact in doubles, so the reference below is exact
       const expected = total % 1_000_000 === 0 ? total / 1_000_000 : Math.floor(total / 1_000_000) + 1;
-      expect(costMicros(usage, p)).toBe(expected);
+      expect(estimateCostMicros(usage, p)).toBe(expected);
     }
   });
 
@@ -799,13 +794,41 @@ describe('self-hunt: found by attacking the first version', () => {
       proto.cacheWritePerMTokMicros = 0;
       proto.longContext = { aboveInputTokens: 1, inputPerMTokMicros: 0, outputPerMTokMicros: 0 };
       proto.inputTokens = 5;
-      expect(() => costMicros({ cacheReadTokens: 1_000_000 }, bare)).toThrow(RangeError);
-      expect(() => costMicros({ cacheCreation5mTokens: 1 }, bare)).toThrow(RangeError);
-      expect(costMicros({ inputTokens: 1_000_000 }, bare)).toBe(1_000_000);
-      expect(costMicros({}, bare)).toBe(0);
+      expect(() => estimateCostMicros({ cacheReadTokens: 1_000_000 }, bare)).toThrow(RangeError);
+      expect(() => estimateCostMicros({ cacheCreation5mTokens: 1 }, bare)).toThrow(RangeError);
+      expect(estimateCostMicros({ inputTokens: 1_000_000 }, bare)).toBe(1_000_000);
+      expect(estimateCostMicros({}, bare)).toBe(0);
     } finally {
       for (const key of ['cacheReadPerMTokMicros', 'cacheWritePerMTokMicros', 'longContext', 'inputTokens']) delete proto[key];
     }
+  });
+
+  it('an unknown reading carries a short escaped reason, whatever a hostile trap throws', () => {
+    const throwing = (thrown: unknown) =>
+      new Proxy({ input_tokens: 1, output_tokens: 1 }, {
+        get() {
+          throw thrown;
+        },
+      });
+    const newline = usageFromAnthropic(throwing(new Error('line one\nline two \u202e')));
+    expect(newline).toEqual({ status: 'unknown', reason: 'line one\\nline two \\u{202E}' });
+    expect(usageFromOpenAI(throwing('a string'))).toEqual({ status: 'unknown', reason: 'usage could not be read' });
+    expect(usageFromOpenAI(throwing(undefined))).toEqual({ status: 'unknown', reason: 'usage could not be read' });
+    const evilMessage = new Error('x');
+    Object.defineProperty(evilMessage, 'message', {
+      get() {
+        throw new Error('nested');
+      },
+    });
+    expect(usageFromAnthropic(throwing(evilMessage))).toEqual({ status: 'unknown', reason: 'usage could not be read' });
+    const long = usageFromAnthropic(throwing(new Error('y'.repeat(5_000))));
+    expect(long.status === 'unknown' && long.reason.length).toBeLessThan(300);
+  });
+
+  it('a known reading has exactly status and usage', () => {
+    const reading = usageFromAnthropic({ input_tokens: 1, output_tokens: 2 });
+    expect(Object.keys(reading).sort()).toEqual(['status', 'usage']);
+    expect(Object.isExtensible(reading)).toBe(true);
   });
 
   it('hostile input scales linearly: a long bad key and a huge unknown-key usage', () => {
@@ -826,8 +849,8 @@ describe('self-hunt: found by attacking the first version', () => {
     const huge = (n: number) => () => {
       const usage: Record<string, number> = {};
       for (let i = 0; i < n; i++) usage[`k${i}`] = i;
-      readAnthropicUsage(usage);
-      readOpenAIUsage(usage);
+      anthropic(usage);
+      openai(usage);
     };
     for (const make of [table, huge]) {
       make(2_000)(); // warm up
@@ -860,15 +883,15 @@ describe('README: integer-micro price table example', () => {
   }
 
   it('runs and prices 2,000 input + 500 output tokens', () => {
-    const snippet = block('For budgets that count integers');
-    const micros = vm.runInNewContext(`${snippet}\nmicros;`, { definePricingTable, assertPricingFresh, priceFor, costMicros, Date: PinnedDate }) as number;
+    const snippet = block('### Dated price tables');
+    const micros = vm.runInNewContext(`${snippet}\nmicros;`, { definePricingTable, assertPricingFresh, priceFor, estimateCostMicros, Date: PinnedDate }) as number;
     expect(micros).toBe(13_500);
   });
 
   it('the unknown-aware settle snippet runs for both a reading and unknown', () => {
-    const snippet = block('These two wrap them for the settle step');
+    const snippet = block('Pure functions from a provider');
     const run = (usage: unknown): unknown =>
-      vm.runInNewContext(`${snippet}\nsettle;`, { readAnthropicUsage, costMicros, response: { usage }, found: { price } });
+      vm.runInNewContext(`${snippet}\nsettle;`, { usageFromAnthropic, estimateCostMicros, response: { usage }, found: { price } });
     expect(run({ input_tokens: 2_000, output_tokens: 500 })).toEqual({ actualAmount: 13_500 });
     expect(run(undefined)).toEqual({ usage: 'unknown' });
   });

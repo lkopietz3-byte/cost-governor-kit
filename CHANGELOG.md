@@ -40,47 +40,43 @@ All notable changes to this project are documented here. The format follows
   `ReserveCapacityRequest`; a succeeded work outcome may carry
   `settle: { actualAmount } | { usage: 'unknown' }`, and `confirmReservation`
   then receives a `CapacitySettlement` (`usage`, `amount`, `reservedAmount`).
-  Unknown usage keeps the full estimate. Without `amount`, behavior is
-  unchanged. New types `CapacitySettlement`, `CapacitySettle`.
-- `estimateCostMicros(rates, usage)`: integer micro-dollars, rounded up; any
-  positive cost is at least 1.
-- `usageFromAnthropic(usage)` and `usageFromOpenAI(usage)`: strict mappers from
-  provider usage JSON to `UsageTokens` that throw on unknown keys.
-  `usageFromAnthropic` prices `cache_creation_input_tokens` as 5-minute writes
-  when the `cache_creation` split is absent.
-- Dated price tables: `definePricingTable({ checkedAt, source, rates })` keyed
-  `provider:model`, `assertPricingFresh(table, now, maxAgeDays)` and
-  `lookupRatesOrThrow(table, key)`, which has no fallback price. New types
-  `DatedModelRates`, `PricingTableDefinition`, `DatedPricingTable`.
+  Unknown usage keeps the full estimate; a reported `-0` is recorded as `0`.
+  Without `amount`, behavior is unchanged. New types `CapacitySettlement`, `CapacitySettle`.
 - `createCommitOnce(fn)`: runs a commit at most once under concurrent and
   repeated calls, for counting a stream on its first visible output. A failure
   is surfaced to every caller and is final for that instance. New types
   `CommitOnce`, `CommitOnceState`.
 - The observatory example vendors the new `admission` module too.
-- **Integer-micro price tables.** `definePricingTable` also accepts entries
-  `{ inputPerMTokMicros, outputPerMTokMicros, cacheWritePerMTokMicros?,
-  cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?, longContext? }` (safe
-  integers; one shape per table) and returns a deeply frozen `MicrosPricingTable`.
-  New `priceFor(table, key)` returns `{ status: 'found', key, price }` or
-  `{ status: 'unknown-model' }` with no fallback price. New
-  `costMicros(usage, price)` is exact BigInt arithmetic, rounded up once on the
-  sum, with cache-read, 5-minute and 1-hour write prices and long-context rates;
-  a bucket with tokens and no price throws. `assertPricingFresh` also takes
-  `(table, { now, maxAgeDays })` and works on either table shape. New types
-  `MicrosRates`, `LongContextRates`, `MicrosPrice`, `MicrosPricingTableDefinition`,
-  `MicrosPricingTable`, `PriceLookup`, `PricingFreshnessOptions`.
-- `readAnthropicUsage(usage)` and `readOpenAIUsage(usage)`: the strict mappers'
-  token counts, or `'unknown'` instead of a throw (missing usage, a string or
-  non-finite count, an unknown field, a hostile getter or Proxy). Unknown settles
-  as `{ usage: 'unknown' }` and keeps the reserved estimate; it is never zero.
+- **Dated integer-micro price tables.** `definePricingTable({ checkedAt, source,
+  rates })` takes entries `{ inputPerMTokMicros, outputPerMTokMicros,
+  cacheWritePerMTokMicros?, cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?,
+  longContext? }` keyed `provider:model` (safe integers; the kit ships no
+  prices) and returns a deeply frozen table. `priceFor(table, key)` returns
+  `{ status: 'found', key, price }` or `{ status: 'unknown-model' }`, with no
+  fallback price. `assertPricingFresh(table, { now, maxAgeDays })` takes `now`
+  from the caller. New types `DatedPricingTable`, `PricingTableDefinition`,
+  `MicrosPrice`, `MicrosRates`, `LongContextRates`, `PriceLookup`,
+  `PricingFreshnessOptions`.
+- `estimateCostMicros(usage, price)`: exact BigInt arithmetic in whole
+  micro-dollars, rounded up once on the sum, with cache-read, 5-minute and
+  1-hour write prices and long-context prices; a bucket with tokens and no
+  price throws, and any positive cost is at least 1.
+- `usageFromAnthropic(usage)` and `usageFromOpenAI(usage)`: provider usage JSON
+  to `{ status: 'known', usage }` (token counts) or `{ status: 'unknown', reason }`.
+  They never throw. Missing usage, a string or non-finite count, a field the kit
+  does not know, a hostile getter or Proxy and similar all read as unknown, which
+  settles as `{ usage: 'unknown' }` and keeps the reserved estimate (never zero).
+  A cache field that is absent counts as 0; one that is present and malformed is
+  unknown. `usageFromAnthropic` prices `cache_creation_input_tokens` as
+  5-minute writes when the `cache_creation` split is absent. New type `UsageReading`.
 - `overrunAmount` on the `confirmed` and `confirmation_failed` results of an
   amount reservation, present only when the reported actual exceeded the hold.
   The actual amount is still recorded in full.
 - `createCommitOnce(fn).attempt()`: shares the single run, never rejects and
   returns `{ ran, status: 'committed', value }` or `{ ran, status: 'failed',
   error }`. New type `CommitOnceResult`.
-- README: integer-micro tables and the unknown-aware readers, with illustrative,
-  dated example prices.
+- README: dated price tables, `estimateCostMicros` and the usage readers, with
+  illustrative, dated example prices.
 
 ### Fixed
 
@@ -109,8 +105,6 @@ All notable changes to this project are documented here. The format follows
   5-minute writes in that case. The README snippet is run by a test.
 
 ### Changed
-
-- A reported `actualAmount` of `-0` is recorded as `0` (it was passed through as `-0`).
 
 - **Behavior:** `withCapacityReservation` now reads `request.amount`. A request
   object that already carried an unrelated `amount` that is not a safe integer

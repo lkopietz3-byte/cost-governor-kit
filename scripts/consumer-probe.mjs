@@ -186,7 +186,7 @@ assert.equal(Object.hasOwn(await withReserveConfirm(ledger, 'fresh', 1, async ()
 {
   const {
     createCommitOnce, estimateCostMicros, usageFromAnthropic, usageFromOpenAI,
-    definePricingTable, assertPricingFresh, lookupRatesOrThrow,
+    definePricingTable, assertPricingFresh, priceFor,
   } = root;
   let runs = 0;
   const once = createCommitOnce(async () => { runs++; return 'counted'; });
@@ -194,25 +194,29 @@ assert.equal(Object.hasOwn(await withReserveConfirm(ledger, 'fresh', 1, async ()
   assert.equal(runs, 1);
   assert.equal(once.state, 'committed');
 
-  assert.equal(estimateCostMicros(rates, { inputTokens: 1_200, outputTokens: 400, cacheReadTokens: 8_000, cacheCreation5mTokens: 2_000 }), 19_500);
-  assert.equal(estimateCostMicros({ inputPerMillion: 0.1, outputPerMillion: 0 }, { inputTokens: 1 }), 1);
+  const price = { inputPerMTokMicros: 3_000_000, outputPerMTokMicros: 15_000_000, cacheReadPerMTokMicros: 300_000, cacheWritePerMTokMicros: 3_750_000 };
+  assert.equal(estimateCostMicros({ inputTokens: 1_200, outputTokens: 400, cacheReadTokens: 8_000, cacheCreation5mTokens: 2_000 }, price), 19_500);
+  assert.equal(estimateCostMicros({ inputTokens: 1 }, { inputPerMTokMicros: 100_000, outputPerMTokMicros: 0 }), 1);
 
   assert.deepEqual(usageFromAnthropic({ input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 100 }), {
-    inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreation5mTokens: 100, cacheCreation1hTokens: 0,
+    status: 'known',
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreation5mTokens: 100, cacheCreation1hTokens: 0 },
   });
-  assert.throws(() => usageFromAnthropic({ input_tokens: 1, output_tokens: 1, surprise: 1 }), TypeError);
+  assert.equal(usageFromAnthropic({ input_tokens: 1, output_tokens: 1, surprise: 1 }).status, 'unknown');
+  assert.equal(usageFromOpenAI(undefined).status, 'unknown');
   assert.deepEqual(usageFromOpenAI({ prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 40 } }), {
-    inputTokens: 60, outputTokens: 5, cacheReadTokens: 40,
+    status: 'known',
+    usage: { inputTokens: 60, outputTokens: 5, cacheReadTokens: 40 },
   });
 
   const table = definePricingTable({
     checkedAt: '2026-10-01', source: 'synthetic',
-    rates: { 'toy:model': { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 } },
+    rates: { 'toy:model': price },
   });
-  assert.deepEqual(lookupRatesOrThrow(table, 'toy:model'), { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 });
-  assert.throws(() => lookupRatesOrThrow(table, 'toy:other'), /no pricing entry/);
-  assertPricingFresh(table, new Date('2026-10-10T00:00:00Z'), 30);
-  assert.throws(() => assertPricingFresh(table, new Date('2027-01-01T00:00:00Z'), 30), /days old/);
+  assert.deepEqual(priceFor(table, 'toy:model'), { status: 'found', key: 'toy:model', price });
+  assert.deepEqual(priceFor(table, 'toy:other'), { status: 'unknown-model', key: 'toy:other' });
+  assertPricingFresh(table, { now: new Date('2026-10-10T00:00:00Z'), maxAgeDays: 30 });
+  assert.throws(() => assertPricingFresh(table, { now: new Date('2027-01-01T00:00:00Z'), maxAgeDays: 30 }), /days old/);
 
   const settled = [];
   const amountResult = await withCapacityReservation({

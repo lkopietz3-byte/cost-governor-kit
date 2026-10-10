@@ -5,9 +5,10 @@
 A small, zero-dependency TypeScript library for four cost-safety jobs in apps
 that call paid AI APIs:
 
-1. **Pricing math** (`estimateCostUsd`): token counts plus rates you supply in,
-   dollars out, with cache reads, 5-minute cache writes and 1-hour cache writes
-   priced as separate line items.
+1. **Pricing math** (`estimateCostUsd`, `estimateCostMicros`): token counts plus
+   prices you supply in, dollars or exact integer micro-dollars out, with cache
+   reads, 5-minute cache writes and 1-hour cache writes priced as separate line
+   items, from a dated table that rejects unknown models.
 2. **A pre-call dollar ceiling** (`checkPreCallCeiling`): decide *before* a call
    whether spend so far plus the next call's estimated cost stays within a hard
    cap. Rates are always passed in; the library has no price table.
@@ -641,96 +642,17 @@ Batch discounts, US-only inference surcharges and fast-mode prices are not
 modeled separately. Anthropic applies the cache multipliers on top of those, so
 fold them into the two rates you pass.
 
-### `estimateCostMicros(rates, usage): number`
-
-The same validation, buckets and formula as `estimateCostUsd`, returned in whole
-micro-dollars (1 = $0.000001) and **rounded up**, for budgets and reservations
-that count integers. A call that costs a fraction of a micro-dollar counts as 1,
-never 0, so a running total of these values never under-counts. A sum within
-floating-point noise of a whole number (relative 1e-12, at most 0.000001 of a
-micro-dollar) is taken as that number, so `8,000 x 3 x 0.1` (which is
-`2400.0000000000005` in binary) does not add a micro-dollar: the quickstart
-call is exactly `19500`. A positive cost never snaps to 0; it is at least 1. Because it rounds up, it
-can be one more than `estimateCostUsd(...) * 1e6`.
-
-### Provider usage mappers: `usageFromAnthropic(usage)`, `usageFromOpenAI(usage)`
-
-Pure functions from a provider's `usage` JSON to `UsageTokens`, as strict as
-`estimateCostUsd`: **any key they do not know throws**, so a new provider field
-is never priced at $0.
-
-- `usageFromAnthropic` requires `input_tokens` and `output_tokens` (merge a
-  streaming `message_delta` usage with the `message_start` one first). With the
-  `cache_creation` split it fills the 5-minute and 1-hour buckets, and a
-  `cache_creation_input_tokens` total that disagrees with the split throws.
-  **Without the split, the whole `cache_creation_input_tokens` total is priced
-  as 5-minute writes**, never dropped. Documented nullable fields may be `null`.
-  `service_tier` is accepted and ignored (fold the tier's price into your
-  rates); `server_tool_use` is accepted only when its counts are 0, because
-  per-request tool fees are not priced here.
-- `usageFromOpenAI` accepts the Chat Completions shape (`prompt_tokens`, ...) or
-  the Responses shape (`input_tokens`, ...), not a mix. Cached tokens become
-  `cacheReadTokens` and are subtracted from the prompt total. Nonzero audio
-  tokens throw (they are billed at other rates); `total_tokens`, when present,
-  must add up. **Set `cacheReadPerMillion` for OpenAI models**: their cached-input
-  discount is not the 0.1x default for every model.
-
-```js
-const cost = estimateCostUsd(rates, usageFromAnthropic(response.usage));
-```
-
-The test fixtures for both were written by hand from the providers' documented
-shapes, not captured from live responses.
-
-### Dated price tables: `definePricingTable`, `assertPricingFresh`, `lookupRatesOrThrow`
-
-The kit still ships no prices. A dated table records when you checked yours and
-where:
-
-```js
-const table = definePricingTable({
-  checkedAt: '2026-10-01', // or an ISO date-time with a zone
-  source: 'https://example.com/pricing', // where you read the prices
-  rates: {
-    // Illustrative numbers; use current published prices.
-    'anthropic:my-model': { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 },
-    'openai:my-model': { inputPerMillion: 2, outputPerMillion: 8, cacheReadPerMillion: 1 },
-  },
-});
-assertPricingFresh(table, new Date(), 30); // throws once the table is more than 30 days old
-const rates = lookupRatesOrThrow(table, 'anthropic:my-model'); // throws for an unknown model
-```
-
-- Keys are `provider:model` with a lowercase provider; the model part may contain
-  `:` (some Bedrock ids do) but no whitespace or control characters.
-- Every entry needs exactly `inputPerMillion`, `outputPerMillion` and
-  `cacheReadPerMillion`. `cacheReadPerMillion` is required here so a dated table
-  never falls back to the 0.1x default; a typo such as `cacheWritePerMillion`
-  throws.
-- The result is a frozen copy with a null-prototype `rates` record.
-  `lookupRatesOrThrow` matches own keys only (`constructor` and `__proto__`
-  throw like any unknown model), re-validates the entry and returns a fresh
-  copy. **There is no fallback price.**
-- `assertPricingFresh` allows a `checkedAt` up to one day in the future (a date
-  written in a zone ahead of UTC) and throws past that. A stale table throws an
-  `Error` naming its date, age and source.
-
-Long-context surcharges and per-model cache-write prices are not modeled in this
-per-million shape (the cache-write multipliers stay fixed at 1.25x and 2x). The
-integer-micro shape below models both.
-
-### Integer-micro price tables: `definePricingTable`, `priceFor`, `costMicros`
+### Dated price tables: `definePricingTable`, `assertPricingFresh`, `priceFor`
 
 For budgets that count integers, write prices as whole micro-dollars per million
-tokens. `definePricingTable` accepts this shape too (one table uses one shape),
-and the cost math is exact BigInt arithmetic with no floating point. The numbers
-below are **illustrative, made up for this page and dated 2026-10-01; they are
-not any provider's prices.** Check the current published prices before you use
-any.
+tokens, with the date you checked them and where you read them. The kit ships no
+prices. The numbers below are **illustrative, made up for this page and dated
+2026-10-01; they are not any provider's prices.** Check the current published
+prices before you use any.
 
 ```js
 const table = definePricingTable({
-  checkedAt: '2026-10-01', // when you last checked the prices
+  checkedAt: '2026-10-01', // when you last checked the prices (YYYY-MM-DD, or an ISO date-time with a zone)
   source: 'https://example.com/pricing', // where you read them
   rates: {
     'anthropic:my-model': {
@@ -739,7 +661,7 @@ const table = definePricingTable({
       cacheWritePerMTokMicros: 3_750_000, // 5-minute writes
       cacheWrite1hPerMTokMicros: 6_000_000, // 1-hour writes
       cacheReadPerMTokMicros: 300_000,
-      // Optional: above this prompt size these rates replace the base rates for the whole request.
+      // Optional: above this prompt size these prices replace the base prices for the whole request.
       longContext: { aboveInputTokens: 200_000, inputPerMTokMicros: 6_000_000, outputPerMTokMicros: 22_500_000, cacheReadPerMTokMicros: 600_000, cacheWritePerMTokMicros: 7_500_000, cacheWrite1hPerMTokMicros: 12_000_000 },
     },
   },
@@ -747,61 +669,96 @@ const table = definePricingTable({
 assertPricingFresh(table, { now: new Date(), maxAgeDays: 30 }); // throws once the table is older than 30 days
 const found = priceFor(table, 'anthropic:my-model'); // { status: 'found', key, price } or { status: 'unknown-model' }
 if (found.status === 'unknown-model') throw new Error('no price for this model; refuse the call');
-const micros = costMicros({ inputTokens: 2_000, outputTokens: 500 }, found.price);
+const micros = estimateCostMicros({ inputTokens: 2_000, outputTokens: 500 }, found.price);
 ```
 
+- Keys are `provider:model` with a lowercase provider; the model part may contain
+  `:` (some Bedrock ids do) but no whitespace or control characters. An entry
+  needs `inputPerMTokMicros` and `outputPerMTokMicros`; any other key (a typo such
+  as `cacheWritePerMillion`) throws.
+- **Safe integers only.** A price is a non-negative safe integer (at most
+  2^53 - 1). A larger value, a fraction, `NaN`, `Infinity`, a negative, a string
+  and a BigInt are rejected; `-0` reads as 0.
+- The result is frozen all the way down with a null-prototype `rates` record, so
+  editing your input afterward changes nothing.
 - **`priceFor(table, key)`** returns `{ status: 'found', key, price }` or
   `{ status: 'unknown-model' }`. There is no fallback price, ever: an unknown
   key, a missing key, `constructor` and `__proto__` are all `unknown-model`.
   Decide what to do with that (refuse the call, or fail the deploy); a missing
-  price must not become a free call. A malformed table or entry throws.
-- **`costMicros(usage, price)`** is exact and **rounds up once**, on the sum of
-  all buckets (not per bucket). It is never below the true cost and at most one
-  micro-dollar above it; zero usage is 0 and any positive cost is at least 1.
-  A bucket with tokens and no configured price throws (a cache read is never
-  priced at 0 or by a hidden multiplier). Not to be confused with the older
-  `estimateCostMicros(rates, usage)`, which takes per-million USD rates.
-- **Long context:** when the prompt (input + cache reads + cache writes) is
-  strictly greater than `aboveInputTokens`, the long-context rates apply to
-  every bucket. A bucket the long rates do not price throws; it does not fall
-  back to the base rates. Output tokens do not count toward the threshold.
-- **Cache writes:** `cacheWritePerMTokMicros` prices the 5-minute bucket (and a
-  `cache_creation_input_tokens` total the provider did not split);
-  `cacheWrite1hPerMTokMicros` prices the 1-hour bucket.
-- **Safe integers only.** A price is a safe integer (at most 2^53 - 1). A larger
-  value, a fraction, `NaN`, `Infinity`, a negative, a string and a BigInt are
-  rejected; `-0` reads as 0. A cost past 2^53 - 1 micro-dollars throws.
+  price must not become a free call. A malformed table or entry throws. It
+  returns a fresh frozen copy, so editing a price cannot change the table.
 - `assertPricingFresh(table, { now, maxAgeDays })` takes `now` from you (the kit
-  reads no clock). A table exactly `maxAgeDays` old passes; older throws; a
-  `checkedAt` more than a day ahead throws. The original
-  `assertPricingFresh(table, now, maxAgeDays)` form still works.
-- The result is frozen all the way down, and `priceFor` returns a fresh frozen
-  copy, so editing a price after the fact cannot change the table.
+  reads no clock). A table exactly `maxAgeDays` old passes; older throws an
+  `Error` naming its date, age and source; a `checkedAt` more than a day ahead
+  throws. Anything but `{ now, maxAgeDays }` is rejected.
 
-### Reading usage, or saying "unknown": `readAnthropicUsage`, `readOpenAIUsage`
+### `estimateCostMicros(usage, price): number`
 
-`usageFromAnthropic` and `usageFromOpenAI` (above) throw on anything they do not
-understand. These two wrap them for the settle step, where paid work has already
-happened and a throw would lose the result: they return the same token counts,
-or the string `'unknown'`, and never throw.
+The cost of one call in whole micro-dollars (1 = $0.000001), exact and **rounded
+up once**, on the sum of all buckets (not per bucket). The arithmetic is BigInt,
+so no floating-point error can enter a budget. The result is never below the
+true cost and at most one micro-dollar above it; zero usage is 0 and any
+positive cost is at least 1, so a tiny call is never free. A result past 2^53 - 1
+throws.
+
+- Buckets: `inputTokens` at `inputPerMTokMicros`, `outputTokens` at
+  `outputPerMTokMicros`, `cacheReadTokens` at `cacheReadPerMTokMicros`,
+  `cacheCreation5mTokens` at `cacheWritePerMTokMicros` (also a
+  `cache_creation_input_tokens` total the provider did not split), and
+  `cacheCreation1hTokens` at `cacheWrite1hPerMTokMicros`.
+- **A bucket with tokens and no configured price throws.** A cache read is never
+  priced at 0 or by a hidden multiplier. A bucket with 0 tokens needs no price.
+- **Long context:** when the prompt (input + cache reads + cache writes) is
+  strictly greater than `aboveInputTokens`, the long-context prices apply to
+  every bucket. A bucket the long prices do not price throws; it does not fall
+  back to the base prices. Output tokens do not count toward the threshold.
+- Usage must be known token counts (unknown fields, strings, fractions, negatives
+  and BigInts throw). Each field of `usage` and `price` is read once.
+
+`estimateCostUsd(rates, usage)` above is the USD-float estimator with
+`ModelRates`; use `estimateCostMicros` with a dated table for budgets.
+
+### Provider usage: `usageFromAnthropic(usage)`, `usageFromOpenAI(usage)`
+
+Pure functions from a provider's `usage` JSON to either known token counts or
+"unknown". They never throw, because they run after paid work has happened and a
+throw would lose the result.
 
 ```js
-const reading = readAnthropicUsage(response.usage); // UsageTokens or 'unknown'
-const settle = reading === 'unknown' ? { usage: 'unknown' } : { actualAmount: costMicros(reading, found.price) };
+const reading = usageFromAnthropic(response.usage); // { status: 'known', usage } or { status: 'unknown', reason }
+const settle = reading.status === 'known' ? { actualAmount: estimateCostMicros(reading.usage, found.price) } : { usage: 'unknown' };
 ```
 
-`'unknown'` means "I cannot tell what this call cost", which is different from
-zero. Pass it as `{ usage: 'unknown' }` and the reservation keeps the full
-estimate. A response with no `usage`, a string count such as `"123"`, `NaN`,
-`Infinity`, a fraction, a BigInt, a count above 2^53 - 1, a field the kit does
-not know (it might be a new billed bucket), a cache-write total that disagrees
-with its split, nonzero tool fees or audio tokens, and a getter or Proxy that
-throws are all `'unknown'`. A cache field that is **absent** counts as 0 (older
-API versions omit them when no caching was used); one that is present but
-malformed is `'unknown'`. A `cache_creation_input_tokens` total with no
-`cache_creation` split is priced as 5-minute writes, never dropped. Each field
-is read once. If `costMicros` throws because your price lacks a bucket, fix the
-table; treat that as a deploy-time error, not as a reason to record zero.
+`unknown` means "I cannot tell what this call cost", which is different from
+zero. Pass it as `{ usage: 'unknown' }` and a reservation keeps its full
+estimate. `reason` is a short escaped sentence for logs.
+
+- `usageFromAnthropic` requires `input_tokens` and `output_tokens` (merge a
+  streaming `message_delta` usage with the `message_start` one first). With the
+  `cache_creation` split it fills the 5-minute and 1-hour buckets, and a
+  `cache_creation_input_tokens` total that disagrees with the split is unknown.
+  **Without the split, the whole `cache_creation_input_tokens` total is priced
+  as 5-minute writes**, never dropped. `service_tier` is accepted and ignored
+  (fold the tier's price into your table); `server_tool_use` is accepted only
+  when its counts are 0, because per-request tool fees are not priced here.
+- `usageFromOpenAI` accepts the Chat Completions shape (`prompt_tokens`, ...) or
+  the Responses shape (`input_tokens`, ...), not a mix. Cached tokens become
+  `cacheReadTokens` and are subtracted from the prompt total. Nonzero audio
+  tokens are unknown (they are billed at other rates); `total_tokens`, when
+  present, must add up. **Set `cacheReadPerMTokMicros` for OpenAI models**, or
+  `estimateCostMicros` throws for cache reads.
+- **Unknown** also covers: a response with no `usage`; a string count such as
+  `"123"`, `NaN`, `Infinity`, a fraction, a BigInt or a count above 2^53 - 1;
+  **any field the kit does not know** (it might be a new billed bucket); and a
+  getter or Proxy that throws.
+- A cache field that is **absent** (or `null`) counts as 0, because older API
+  versions omit them when no caching was used; one that is present but
+  malformed is unknown. Each field is read once, and `-0` reads as 0.
+- If `estimateCostMicros` throws because your price lacks a bucket, fix the
+  table; treat that as a deploy-time error, not as a reason to record zero.
+
+The test fixtures were written by hand from the providers' documented shapes,
+not captured from live responses.
 
 ### `getRatesOrThrow(table, model): ModelRates`
 
@@ -1018,14 +975,14 @@ the provider again.
 ### Dollar amounts on a strict reservation
 
 `ReserveCapacityRequest` takes an optional integer `amount` (a safe integer >= 1,
-in the same unit as `limit`; typically micro-dollars from `costMicros` or `estimateCostMicros`).
+in the same unit as `limit`; typically micro-dollars from `estimateCostMicros`).
 Without it, nothing changes: a hold is one unit and the adapter sees exactly
 `{ key, limit, operationId }`. With it:
 
 - The adapter receives `amount` and must create the hold only when confirmed
   usage plus unexpired holds plus `amount` is at most `limit`.
 - `doTheWork` may add `settle` to a succeeded outcome: `{ actualAmount }` (for
-  example `estimateCostMicros(rates, usageFromAnthropic(response.usage))`) or
+  example `estimateCostMicros(usage, price)` of the real usage) or
   `{ usage: 'unknown' }`. Leaving it out also means unknown.
 - `confirmReservation(reservation, settlement)` then gets a second argument,
   `{ usage: 'reported' | 'unknown', amount, reservedAmount }`. Record `amount`.
@@ -1046,18 +1003,18 @@ Without it, nothing changes: a hold is one unit and the adapter sees exactly
   (and `overrunAmount` when there was one).
 
 ```ts
-// `found.price` comes from priceFor (see Integer-micro price tables above).
-const amount = costMicros({ inputTokens: 2_000, outputTokens: maxTokens }, found.price);
+// `found.price` comes from priceFor (see Dated price tables above).
+const amount = estimateCostMicros({ inputTokens: 2_000, outputTokens: maxTokens }, found.price);
 const result = await withCapacityReservation(
   ledger,
   { key: `budget:${today}`, limit: 5_000_000, operationId: requestId, amount: Math.max(1, amount) },
   async () => {
     const response = await callYourLlmApi(prompt);
-    const reading = readAnthropicUsage(response.usage);
+    const reading = usageFromAnthropic(response.usage);
     return {
       status: 'succeeded',
       value: response,
-      settle: reading === 'unknown' ? { usage: 'unknown' } : { actualAmount: costMicros(reading, found.price) },
+      settle: reading.status === 'known' ? { actualAmount: estimateCostMicros(reading.usage, found.price) } : { usage: 'unknown' },
     };
   },
 );
@@ -1237,17 +1194,17 @@ behavior under a network partition or Postgres failover.
   provider's page; it cannot know a price changed. Re-check the source when you
   bump `checkedAt`. The examples in this README are illustrative and dated, not
   current prices.
-- **`'unknown'` is not an estimate.** `readAnthropicUsage` and `readOpenAIUsage`
-  say `'unknown'` for anything they cannot read, including a field added after
+- **`unknown` is not an estimate.** `usageFromAnthropic` and `usageFromOpenAI`
+  say `unknown` for anything they cannot read, including a field added after
   this version. A reservation then keeps the full estimate, so a persistent
-  `'unknown'` means you are budgeting at the estimate; watch for it.
-- **Long context is one threshold.** The long-context rates replace the base
-  rates for the whole request above one prompt size. Providers with several
+  `unknown` means you are budgeting at the estimate; watch for it.
+- **Long context is one threshold.** The long-context prices replace the base
+  prices for the whole request above one prompt size. Providers with several
   tiers, per-tool fees, batch or regional surcharges need those folded into the
-  rates you write.
-- **Provider mappers know today's fields.** A field they do not know throws
-  instead of being guessed at. Update the kit, or price the field yourself and
-  pass a copy without it.
+  prices you write.
+- **Provider readers know today's fields.** A field they do not know makes the
+  reading `unknown` instead of being guessed at. Update the kit, or price the
+  field yourself and pass a copy without it.
 - **Not abuse protection.** Pair it with real rate limiting if you need that.
 - **No source maps.** The build emits no `.js.map`/`.d.ts.map`; go-to-definition
   lands on the shipped `.d.ts`/`.js`, not `src/`. The source is small and not

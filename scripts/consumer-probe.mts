@@ -51,10 +51,12 @@ import {
   assertPricingFresh,
   definePricingTable,
   estimateCostMicros,
-  lookupRatesOrThrow,
+  priceFor,
   usageFromAnthropic,
   usageFromOpenAI,
   type DatedPricingTable,
+  type PriceLookup,
+  type UsageReading,
 } from 'cost-governor-kit/pricing';
 import { createCommitOnce, type CapacitySettlement, type CommitOnce } from 'cost-governor-kit/reserveConfirm';
 
@@ -152,13 +154,17 @@ async function admission(): Promise<429 | 503 | null> {
 const dated: DatedPricingTable = definePricingTable({
   checkedAt: '2026-10-01',
   source: 'synthetic',
-  rates: { 'toy:model': { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 } },
+  rates: { 'toy:model': { inputPerMTokMicros: 3_000_000, outputPerMTokMicros: 15_000_000, cacheReadPerMTokMicros: 300_000 } },
 });
-// @ts-expect-error a dated table requires cacheReadPerMillion.
-definePricingTable({ checkedAt: '2026-10-01', source: 's', rates: { 'toy:model': { inputPerMillion: 3, outputPerMillion: 15 } } });
-assertPricingFresh(dated, new Date(), 30);
-const micros: number = estimateCostMicros(lookupRatesOrThrow(dated, 'toy:model'), usageFromAnthropic({}));
-const openAiUsage: UsageTokens = usageFromOpenAI({});
+// @ts-expect-error an entry needs inputPerMTokMicros and outputPerMTokMicros.
+definePricingTable({ checkedAt: '2026-10-01', source: 's', rates: { 'toy:model': { inputPerMTokMicros: 3_000_000 } } });
+assertPricingFresh(dated, { now: new Date(), maxAgeDays: 30 });
+const lookup: PriceLookup = priceFor(dated, 'toy:model');
+const reading: UsageReading = usageFromAnthropic({});
+const micros: number = lookup.status === 'found' && reading.status === 'known' ? estimateCostMicros(reading.usage, lookup.price) : 0;
+const openAiUsage: UsageReading = usageFromOpenAI({});
+const unknownReason: string = openAiUsage.status === 'unknown' ? openAiUsage.reason : '';
+const attempted: Promise<unknown> = createCommitOnce(async () => 1).attempt();
 const once: CommitOnce<number> = createCommitOnce(async () => 1);
 const commitState: 'idle' | 'pending' | 'committed' | 'failed' = once.state;
 const amountRequest: ReserveCapacityRequest = { key: 'k', limit: 10, operationId: 'o', amount: 5 };
@@ -170,6 +176,6 @@ const settledLedger: CapacityReservationLedger = {
 };
 const settleOutcome: CapacityWorkOutcome<number> = { status: 'succeeded', value: 1, settle: { actualAmount: 4 } };
 
-void [admission, micros, openAiUsage, commitState, amountRequest, settledLedger, settleOutcome];
+void [admission, micros, openAiUsage, unknownReason, attempted, commitState, amountRequest, settledLedger, settleOutcome];
 void reservationSubpath;
 void [strict, advisory, allowed, multiplier, logLine, reason];
