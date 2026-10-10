@@ -469,8 +469,10 @@ function plainCounts(usage) {
 /** A short, escaped reason from whatever was thrown; never throws itself. */
 function reasonOf(error) {
     try {
-        if (error instanceof Error && typeof error.message === 'string') {
-            return escapeText(error.message.length > 200 ? `${error.message.slice(0, 200)}…` : error.message);
+        if (error instanceof Error) {
+            const message = error.message; // read once; a getter could answer differently next time
+            if (typeof message === 'string')
+                return escapeText(message.length > 200 ? `${message.slice(0, 200)}…` : message);
         }
     }
     catch {
