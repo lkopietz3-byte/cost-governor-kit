@@ -2,9 +2,9 @@
   "schema": "threshold-sdk-source-v1",
   "package": "cost-governor-kit",
   "version": "0.2.1",
-  "revision": "6bb2e33daeddde14c2ea53a592b18151dd204fbf",
+  "revision": "66d192e80c02508136a5ae36b745aa64e1390adc",
   "sourceDirty": false,
-  "generatedAt": "2026-10-10T21:22:41.163Z",
+  "generatedAt": "2026-10-10T21:30:56.564Z",
   "compiler": "typescript 5.9.3",
   "method": "Fresh ES2022 module transpilation from the owning src; no dist cache.",
   "sources": {
@@ -13,7 +13,7 @@
     "src/pricing.ts": "f550290cde0b058d069faaae2af21d9ae3578994c3569f3de6c9f969b9dbd255",
     "src/preCallCeiling.ts": "531b71b0e502fe7589c41f9f9b68d457c53f799e695f21433d0445a1a9439051",
     "src/reserveConfirm.ts": "a10a3810ed36ef0ea47f1458ad75758ea3685c547b2a2a2d41fca7236c4b0ecd",
-    "src/admission.ts": "add2b43980059d756bd371438585eaa448d7048e6f8b39f706d4d6f6d0949595",
+    "src/admission.ts": "765533106cd132b29a0b5436f2a590862b2e05cbe3f273f33f2643748e27eec0",
     "LICENSE": "07605f7cd19dfee07729db4294313d725e3a0ea61c77056c0ebe53669c274cf3"
   },
   "outputs": {
@@ -22,7 +22,7 @@
     "pricing.js": "b73af32b8d2fb7b3b6ee09e23d97ad9945139ed55eb171ae43e6000d280c2b9f",
     "preCallCeiling.js": "87ee976e6bd65230eadfed0e7f7fb3d22706597377944a16eac3a85f6388d3b2",
     "reserveConfirm.js": "3ab45dfde8865977b1c9132137e6cb9cb9b4d15a43bab17481264c12f945f316",
-    "admission.js": "4a6d042c9661495a1df190efd668d21ee009f5d78c4fe85b3e9ca8d0787a1a59",
+    "admission.js": "750fc480e8738b7e9b807c52ae534cf7d22d0d984cc38ef1ee5f991f4533fd7e",
     "LICENSE": "07605f7cd19dfee07729db4294313d725e3a0ea61c77056c0ebe53669c274cf3"
   }
 }

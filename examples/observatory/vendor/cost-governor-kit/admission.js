@@ -132,7 +132,8 @@ const TIMED_OUT = Symbol('admission timeout');
  *
  * | outcome | status | why |
  * | --- | --- | --- |
- * | `admitted` | `null` | proceed with the call |
+ * | `admitted` with a valid `windowId` | `null` | proceed with the call |
+ * | `admitted` without one, or naming a `scopeKey` | `503` | malformed; fail closed |
  * | `limited` on a per-user scope | `429` | this caller used their allowance |
  * | `limited` on any other scope | `503` | shared capacity is exhausted; not the caller's fault |
  * | `unavailable` | `503` | the cap could not be confirmed, so the call is refused |
@@ -151,15 +152,23 @@ export function admissionHttpStatus(outcome, opts) {
         return 503;
     let status;
     let scopeKey;
+    let windowId;
     try {
         status = outcome.status;
         scopeKey = outcome.scopeKey;
+        windowId = outcome.windowId;
     }
     catch {
         return 503;
     }
-    if (status === 'admitted')
-        return null;
+    if (status === 'admitted') {
+        // null is permission to make the paid call, so only a well-formed admitted
+        // outcome earns it: a real UTC day or hour windowId and no scopeKey.
+        const wellFormed = typeof windowId === 'string' &&
+            (isWindowId(windowId, 'utc-day') || isWindowId(windowId, 'utc-hour')) &&
+            scopeKey === undefined;
+        return wellFormed ? null : 503;
+    }
     if (status === 'limited' && typeof scopeKey === 'string') {
         return prefixes.some((prefix) => scopeKey.startsWith(prefix)) ? 429 : 503;
     }
