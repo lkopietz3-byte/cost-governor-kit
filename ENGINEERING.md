@@ -45,6 +45,9 @@
   atomicity, duplicate suppression and durability belong to the caller's
   adapter.
 
+- `admissionHttpStatus` returns `null` (permission to proceed) only for a
+  well-formed admitted outcome: a canonical UTC day or hour `windowId` and no
+  `scopeKey`. Anything else is 503.
 - `admitBeforeCall` never throws, never rejects, never retries and never
   refunds. Only a validated `admitted` reply allows a call; a malformed request,
   a store throw, a timeout or a malformed reply is `unavailable`. The request is
@@ -131,8 +134,9 @@ proves anything about concurrent Postgres sessions.
   doubles; they prove the helpers' call sequencing, not atomicity.
 - The README's Postgres admission recipe runs on PGlite in `npm test`
   (`src/admissionRecipePglite.test.ts`), a single connection: it proves the
-  recipe's logic, not that a cap holds under concurrent sessions or across
-  instances. The D1 and Redis recipes are not run by any test.
+  recipe's logic and that an ordinary non-owner role with only the documented
+  `EXECUTE` grant can admit (the function is `security definer`), not that a
+  cap holds under concurrent sessions or across instances. The D1 and Redis recipes are not run by any test.
 - The reference SQL runs against PostgreSQL 18 via PGlite in `npm test` (CI
   covers it), a **single connection**: this proves the grant fix and the
   check/commit/window logic, not concurrent sessions or a live Supabase

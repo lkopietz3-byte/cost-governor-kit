@@ -984,10 +984,28 @@ describe('adversarial probes', () => {
 
   it('false ADMIT probe 9: a forged or near-miss outcome never maps to "proceed"', () => {
     for (const forged of [{ status: 'admitted ' }, { status: 'Admitted' }, {}, 'admitted', undefined, { status: 'admitted', valueOf: () => null }]) {
-      const status = admissionHttpStatus(forged as unknown as AdmitOutcome);
-      if ((forged as { status?: unknown } | undefined)?.status === 'admitted') expect(status).toBeNull();
-      else expect(status).toBe(503);
+      // None of these is a well-formed admitted outcome (no windowId), so none may map to null.
+      expect(admissionHttpStatus(forged as unknown as AdmitOutcome)).toBe(503);
     }
+  });
+
+  it.each([
+    ['admitted with no windowId', { status: 'admitted' }],
+    ['admitted with a blank windowId', { status: 'admitted', windowId: '' }],
+    ['admitted with a non-canonical windowId', { status: 'admitted', windowId: '10/10/2026' }],
+    ['admitted with an impossible date', { status: 'admitted', windowId: '2026-02-30' }],
+    ['admitted with hour 24', { status: 'admitted', windowId: '2026-10-10T24' }],
+    ['admitted with a numeric windowId', { status: 'admitted', windowId: 20261010 }],
+    ['admitted that also names a scopeKey', { status: 'admitted', windowId: DAY, scopeKey: 'explain:global' }],
+    ['admitted whose windowId getter throws', { status: 'admitted', get windowId() { throw new Error('x'); } }],
+  ])('false ADMIT probe 17 (review finding): admissionHttpStatus fails closed on a malformed admitted outcome (%s)', (_label, outcome) => {
+    expect(admissionHttpStatus(outcome as unknown as AdmitOutcome)).toBe(503);
+  });
+
+  it('control for probe 17: well-formed admitted outcomes, day or hour, still map to null', () => {
+    expect(admissionHttpStatus({ status: 'admitted', windowId: DAY })).toBeNull();
+    expect(admissionHttpStatus({ status: 'admitted', windowId: `${DAY}T23` })).toBeNull();
+    expect(admissionHttpStatus({ status: 'admitted', windowId: DAY, scopeKey: undefined } as AdmitOutcome)).toBeNull();
   });
 
   it('false ADMIT probe 10: a cache-write split that under-reports its total is refused, not priced low', () => {

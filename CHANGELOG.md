@@ -17,7 +17,8 @@ All notable changes to this project are documented here. The format follows
   not requested, an admit past a zero limit) and a malformed request (blank or
   duplicate keys, bad limits, no scopes) all resolve to
   `{ status: 'unavailable', reason }`. `admissionHttpStatus(outcome, opts?)`
-  maps admitted to `null`, limited on a per-user scope to 429, and limited on a
+  maps a well-formed admitted outcome (a canonical `windowId`, no `scopeKey`)
+  to `null` and anything malformed to 503, limited on a per-user scope to 429, and limited on a
   global scope or unavailable to 503. A reply that arrives after the
   deadline (measured before the store is called, so event-loop blocking counts)
   is a timeout even if it says admitted; the scopes array's `length` is read
@@ -29,8 +30,10 @@ All notable changes to this project are documented here. The format follows
   `AdmitBeforeCallRequest`, `AdmissionHttpStatusOptions` and
   `InMemoryAdmissionStoreOptions` types.
 - README: "Admission control (the pattern most apps need)", with store recipes
-  for Postgres (tested on PGlite by `src/admissionRecipePglite.test.ts`, one
-  connection), Cloudflare D1 (`db.batch()` with a `CHECK` constraint; batch
+  for Postgres (a `security definer` function owned by the migration role, so
+  the server role needs only `EXECUTE`; tested on PGlite by
+  `src/admissionRecipePglite.test.ts`, one connection, including an ordinary
+  non-owner role without `BYPASSRLS`), Cloudflare D1 (`db.batch()` with a `CHECK` constraint; batch
   rollback is Reported from Cloudflare's docs) and Redis/Upstash (one Lua
   `EVAL`; not run). Each is a recipe the app owns and tests.
 - **Integer micro-dollar reservations:** an optional `amount` on

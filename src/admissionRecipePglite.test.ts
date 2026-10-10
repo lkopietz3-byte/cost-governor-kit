@@ -8,8 +8,10 @@
  * What this proves: the recipe applies to a real (WASM) Postgres, and its
  * logic matches the AdmissionStore contract on one connection: all or nothing
  * across scopes, the limited scope is named, a limit only goes down within a
- * window, malformed input is rejected, and the window id comes from the
- * database clock in the canonical format.
+ * window, malformed input is rejected, the window id comes from the
+ * database clock in the canonical format, and an ordinary non-owner role
+ * (no BYPASSRLS) given only the documented EXECUTE grant can admit through the
+ * SECURITY DEFINER function but cannot read or write the table.
  *
  * What it does NOT prove: PGlite is a single connection, so nothing here
  * shows the cap holds under concurrent sessions or across instances. That
@@ -124,6 +126,43 @@ describe('README Postgres admission recipe on PGlite (single connection: logic, 
 
   it('rejects an unknown window', async () => {
     await expect(db.query("select * from public.admit_scopes(array['a'], array[1], 'utc-week')")).rejects.toThrow(/invalid admission request/);
+  });
+
+  it('an ordinary non-owner server role, given only the documented grant, can admit but cannot touch the table', async () => {
+    // The documented grant line, with service_role swapped for a test role.
+    const grantLine = /^-- (grant execute on function public\.admit_scopes\(text\[\], integer\[\], text\) to) service_role;$/m.exec(recipeSql());
+    expect(grantLine).not.toBeNull();
+    await db.exec(`
+      create role app_server_test login nobypassrls nosuperuser;
+      create role app_other_test login nobypassrls nosuperuser;
+      ${(grantLine as RegExpExecArray)[1]} app_server_test;
+    `);
+    const roles = await db.query<{ rolbypassrls: boolean; rolsuper: boolean }>(
+      "select rolbypassrls, rolsuper from pg_roles where rolname = 'app_server_test'",
+    );
+    expect(roles.rows).toEqual([{ rolbypassrls: false, rolsuper: false }]);
+    try {
+      await db.exec('set role app_server_test');
+      const { day } = await dbDay();
+      expect(await admitSql(['t6:global', 't6:user:a'], [5, 1])).toEqual({ status: 'admitted', scope_key: null, window_id: day });
+      expect(await admitSql(['t6:global', 't6:user:a'], [5, 1])).toMatchObject({ status: 'limited', scope_key: 't6:user:a' });
+      await expect(db.query('select * from public.admission_usage')).rejects.toThrow(/permission denied/);
+      await expect(db.query("insert into public.admission_usage values ('utc-day', 'x', 'k', 0, 99)")).rejects.toThrow(/permission denied/);
+      await expect(db.query("update public.admission_usage set used = 0 where scope_key = 't6:user:a'")).rejects.toThrow(/permission denied/);
+      await db.exec('reset role');
+      await db.exec('set role app_other_test');
+      await expect(admitSql(['t6:global'], [5])).rejects.toThrow(/permission denied/);
+    } finally {
+      await db.exec('reset role');
+    }
+    // The non-owner's admissions were really counted (by the definer, as the owner).
+    const used = await db.query<{ scope_key: string; used: number }>(
+      "select scope_key, used from public.admission_usage where scope_key like 't6:%' order by scope_key",
+    );
+    expect(used.rows).toEqual([
+      { scope_key: 't6:global', used: 1 },
+      { scope_key: 't6:user:a', used: 1 },
+    ]);
   });
 
   it("the README's TypeScript store, run inside admitBeforeCall, gives the documented outcomes", async () => {

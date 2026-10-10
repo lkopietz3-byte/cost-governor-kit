@@ -185,7 +185,7 @@ one of:
 
 | Outcome | Meaning | `admissionHttpStatus` |
 | --- | --- | --- |
-| `{ status: 'admitted', windowId }` | every scope had room and was counted | `null` (proceed) |
+| `{ status: 'admitted', windowId }` | every scope had room and was counted | `null` (proceed) only when `windowId` is a real UTC day or hour and there is no `scopeKey`; otherwise `503` |
 | `{ status: 'limited', scopeKey, windowId }` on a per-user scope | that caller used their allowance | `429` |
 | `{ status: 'limited', scopeKey, windowId }` on any other scope | shared capacity is used up, not the caller's fault | `503` |
 | `{ status: 'unavailable', reason, cause? }` | the cap could not be confirmed | `503` |
@@ -257,6 +257,9 @@ full, an exception rolls that block back, so nothing is counted.
 <!-- admission-postgres-recipe:start -->
 ```sql
 -- Admission counters. The database owns the clock; no app timestamps.
+-- Run this as the role that should OWN the table and the function (on
+-- Supabase, the migration role `postgres`). The server role never touches the
+-- table directly: it only executes admit_scopes, which runs as the owner.
 create table public.admission_usage (
   window_kind text not null check (window_kind in ('utc-day', 'utc-hour')),
   window_id   text not null,
@@ -265,13 +268,18 @@ create table public.admission_usage (
   lim         integer not null check (lim >= 0),
   primary key (window_kind, window_id, scope_key)
 );
+-- RLS on with no policies: no non-owner role can read or write rows directly.
+-- The owner is exempt (RLS is not FORCEd), which is how the function writes.
 alter table public.admission_usage enable row level security;
 revoke all on table public.admission_usage from public;
 
 create function public.admit_scopes(p_keys text[], p_limits integer[], p_window text)
 returns table (status text, scope_key text, window_id text)
 language plpgsql
-security invoker
+-- Runs as the owner, so the caller needs EXECUTE only: no table grants, no
+-- RLS policies, no BYPASSRLS. The search_path is pinned empty and every table
+-- reference is schema-qualified, so a caller cannot redirect it.
+security definer
 set search_path = ''
 as $$
 #variable_conflict use_column
@@ -335,14 +343,23 @@ begin
 end;
 $$;
 revoke all on function public.admit_scopes(text[], integer[], text) from public;
--- The function runs with the caller's rights (security invoker), so the one role
--- your server uses needs the table AND the function. On Supabase, for example:
---   grant select, insert, update on table public.admission_usage to service_role;
---   grant execute on function public.admit_scopes(text[], integer[], text) to service_role;
--- Supabase's default privileges also grant anon and authenticated, which
--- `revoke ... from public` does not remove; revoke from them explicitly:
---   revoke all on table public.admission_usage from anon, authenticated;
---   revoke all on function public.admit_scopes(text[], integer[], text) from anon, authenticated;
+-- Supabase's default privileges grant new tables and functions in `public` to
+-- anon and authenticated, which `revoke ... from public` does not remove.
+do $$
+begin
+  if exists (select from pg_roles where rolname = 'anon') then
+    revoke all on table public.admission_usage from anon;
+    revoke all on function public.admit_scopes(text[], integer[], text) from anon;
+  end if;
+  if exists (select from pg_roles where rolname = 'authenticated') then
+    revoke all on table public.admission_usage from authenticated;
+    revoke all on function public.admit_scopes(text[], integer[], text) from authenticated;
+  end if;
+end;
+$$;
+-- Then grant EXECUTE to the one role your server uses, and nothing else.
+-- On Supabase that is service_role:
+-- grant execute on function public.admit_scopes(text[], integer[], text) to service_role;
 -- A missing grant shows up as store_error, so every call is refused (closed, but an outage).
 ```
 <!-- admission-postgres-recipe:end -->
@@ -369,6 +386,14 @@ const store: AdmissionStore = {
 };
 ```
 
+**Who owns what.** The migration role owns both the table and the function.
+Because the function is `security definer`, it runs with the owner's rights,
+so the server role needs only `EXECUTE` on the function: no table privileges,
+no RLS policies and no `BYPASSRLS`. Any other role (including Supabase's
+`anon` and `authenticated`) can neither call the function nor touch the table.
+Keep the function owned by a role that is not a superuser if you can; on
+Supabase it is `postgres`, as with any migration.
+
 The advisory lock serializes every admission in the database, which is simple
 and fine at the volumes these caps exist for. If you outgrow it, drop the lock
 and rely on the row locks the `update ... where used < lim` takes (the keys are
@@ -376,7 +401,11 @@ locked in sorted order, so two requests cannot deadlock), at the cost of
 resolving the window before a possible wait. `src/admissionRecipePglite.test.ts`
 applies this exact SQL, read from this README, to PGlite and runs it through
 `admitBeforeCall`: all-or-nothing, the limited scope, limit lowering, input
-rejection and the window format are checked. **PGlite is a single connection,
+rejection and the window format are checked. It also creates an ordinary
+login role that owns nothing and has no `BYPASSRLS`, applies the documented
+`grant execute` line to it, and checks that the role can admit through the
+function but cannot read or write the table, and that a role without the
+grant cannot call the function. **PGlite is a single connection,
 so that test proves the logic, not concurrency.** A one-off run while writing
 this recipe (2026-10-10, a local Postgres 17.11, 50 separate connections firing
 at once, 5 rounds) admitted exactly 10 of 50 on one key at limit 10, and exactly
