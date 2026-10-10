@@ -232,12 +232,15 @@ export async function withCapacityReservation(ledger, request, doTheWork) {
             return { status: "confirmation_failed", reservation, value: parsed.value, error };
         }
     }
+    // An actual amount above the hold is recorded as is (see readSettle); the
+    // result also says by how much, and only when it happened.
+    const overrun = settlement.amount > settlement.reservedAmount ? { overrunAmount: settlement.amount - settlement.reservedAmount } : {};
     try {
         await ledger.confirmReservation(reservation, settlement);
-        return { status: "confirmed", reservation, value: parsed.value, settlement };
+        return { status: "confirmed", reservation, value: parsed.value, settlement, ...overrun };
     }
     catch (error) {
-        return { status: "confirmation_failed", reservation, value: parsed.value, error, settlement };
+        return { status: "confirmation_failed", reservation, value: parsed.value, error, settlement, ...overrun };
     }
 }
 /** Turn the work's `settle` report into what the adapter records. Throws (making the outcome ambiguous) on anything malformed. */
@@ -254,7 +257,7 @@ function readSettle(settle, reservedAmount) {
         if (typeof actualAmount !== "number" || !Number.isSafeInteger(actualAmount) || actualAmount < 0) {
             throw new RangeError("withCapacityReservation: outcome.settle.actualAmount must be a non-negative safe integer");
         }
-        return Object.freeze({ usage: "reported", amount: actualAmount, reservedAmount });
+        return Object.freeze({ usage: "reported", amount: actualAmount + 0, reservedAmount }); // -0 reads as 0
     }
     if (keys.length === 1 && keys[0] === "usage") {
         const usage = settle.usage;
@@ -434,6 +437,11 @@ export function createCommitOnce(fn) {
         }
         return shared;
     };
+    const attempt = () => {
+        const ran = shared === undefined; // true only for the call that is about to run fn
+        return commit().then((value) => ({ ran, status: "committed", value }), (error) => ({ ran, status: "failed", error }));
+    };
     Object.defineProperty(commit, "state", { get: () => state, enumerable: true });
+    Object.defineProperty(commit, "attempt", { value: attempt, enumerable: true });
     return commit;
 }

@@ -34,7 +34,7 @@ const SERVED_SOURCE_FILES = [
   'index.html', 'icon.svg', 'app.mjs', 'flow-map.css', 'style.css', 'viewport.css',
   'lib/flow-map.mjs', 'lib/insights.mjs', 'lib/notebook.mjs', 'lib/session.mjs',
   'vendor/cost-governor-kit/LICENSE', 'vendor/cost-governor-kit/index.js',
-  'vendor/cost-governor-kit/internal.js', 'vendor/cost-governor-kit/preCallCeiling.js',
+  'vendor/cost-governor-kit/internal.js', 'vendor/cost-governor-kit/micros.js', 'vendor/cost-governor-kit/preCallCeiling.js',
   'vendor/cost-governor-kit/pricing.js', 'vendor/cost-governor-kit/reserveConfirm.js',
   'vendor/cost-governor-kit/admission.js',
   'vendor/cost-governor-kit/source.json', 'tools/verify-browser.mjs',

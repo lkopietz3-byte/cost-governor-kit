@@ -29,6 +29,9 @@
  * different number.
  */
 import { describe, escapeText, isBlank, isPlainRecord, parseIsoInstant } from './internal.js';
+import { buildMicrosRates, costMicros, isMicrosShaped, priceFor, } from './micros.js';
+// Integer-micro prices, tables and exact cost math live in micros.ts.
+export { costMicros, priceFor };
 /**
  * Cache reads (`cache_read_input_tokens`) are priced at 0.1x the base input
  * rate by default. This matches Anthropic's standard multiplier, but not
@@ -490,26 +493,72 @@ function readProviderCount(fn, path, value, optional) {
     }
     return value;
 }
+// ---------------------------------------------------------------------------
+// Usage readers that return "unknown" instead of throwing
+// ---------------------------------------------------------------------------
+/** Make every count a plain non-negative number: `-0` reads as `0`. */
+function plainCounts(usage) {
+    const out = {};
+    for (const key of Object.keys(usage)) {
+        const count = usage[key];
+        if (count !== undefined)
+            out[key] = count + 0;
+    }
+    return out;
+}
+/**
+ * Read an Anthropic Messages API `usage` block, or say `'unknown'`.
+ *
+ * Returns the token counts exactly as {@link usageFromAnthropic} maps them
+ * (same rules for cache reads, the 5-minute and 1-hour cache-write split, and
+ * a `cache_creation_input_tokens` total with no split, which is priced as
+ * 5-minute writes, never dropped). Wherever {@link usageFromAnthropic} would
+ * throw, this returns `'unknown'` instead, and it never throws:
+ *
+ * - `usage` is missing, `null`, or not a plain object;
+ * - `input_tokens` or `output_tokens` is missing, or any count (including a
+ *   cache field that is present) is not a non-negative safe integer: a string
+ *   such as `"123"`, `NaN`, `Infinity`, a fraction, a BigInt, or above 2^53 - 1;
+ * - a field this version does not know about is present (it might be a new
+ *   billed bucket), a cache-write total disagrees with its split, or tool
+ *   fees are nonzero;
+ * - a getter, Proxy trap or revoked Proxy throws.
+ *
+ * A cache field that is absent or `null` counts as 0, because Anthropic omits
+ * them when no caching was used on older API versions; a field that is present
+ * but malformed is unknown. `'unknown'` is the right input to
+ * `{ usage: 'unknown' }`, which keeps the reserved estimate. Never treat it as
+ * zero. Each field is read once, and `-0` reads as `0`.
+ */
+export function readAnthropicUsage(usage) {
+    try {
+        return plainCounts(usageFromAnthropic(usage));
+    }
+    catch {
+        return 'unknown';
+    }
+}
+/**
+ * Read an OpenAI `usage` object (Chat Completions or Responses shape), or say
+ * `'unknown'`. The counterpart of {@link readAnthropicUsage}: the same token
+ * counts as {@link usageFromOpenAI} (cached prompt tokens become
+ * `cacheReadTokens` and are subtracted from `inputTokens`), and `'unknown'`
+ * wherever {@link usageFromOpenAI} would throw. A response with no `usage` at
+ * all is `'unknown'`, never zero. Never throws.
+ */
+export function readOpenAIUsage(usage) {
+    try {
+        return plainCounts(usageFromOpenAI(usage));
+    }
+    catch {
+        return 'unknown';
+    }
+}
 const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
 // provider: lowercase letters, digits, '-' or '_'; model: no whitespace (it may contain ':', as some Bedrock ids do).
 const PRICING_KEY = /^[a-z0-9][a-z0-9_-]*:\S+$/;
 const DAY_MS = 86_400_000;
 const RATE_FIELDS = ['inputPerMillion', 'outputPerMillion', 'cacheReadPerMillion'];
-/**
- * Validate and freeze a dated pricing table. This kit still ships no prices:
- * you supply them, with the date you checked them and where you read them.
- *
- * Every entry must have exactly `inputPerMillion`, `outputPerMillion` and
- * `cacheReadPerMillion`, each a finite number >= 0; any other key (a typo
- * like `cacheWritePerMillion`) throws. Keys must look like `provider:model`
- * with a lowercase provider. The result is a frozen copy with a
- * null-prototype `rates` record, so editing your input afterward changes
- * nothing. Pure: no clock is read here; check age with
- * {@link assertPricingFresh}.
- *
- * @throws TypeError for a wrong type or shape, RangeError for a bad date,
- *   blank source, empty table, malformed key or invalid rate.
- */
 export function definePricingTable(definition) {
     const fn = 'definePricingTable';
     if (!isPlainRecord(definition)) {
@@ -528,11 +577,12 @@ export function definePricingTable(definition) {
     if (!isPlainRecord(rawRates)) {
         throw new TypeError(`${fn}: rates must be a plain object keyed by provider:model`);
     }
-    const rates = Object.create(null);
     const keys = Reflect.ownKeys(rawRates);
     if (keys.length === 0) {
         throw new RangeError(`${fn}: rates must have at least one entry`);
     }
+    // Validate every key, then read every entry exactly once.
+    const entries = [];
     for (const key of keys) {
         if (typeof key === 'symbol') {
             throw new TypeError(`${fn}: rates has a symbol key; keys must be provider:model strings`);
@@ -540,23 +590,22 @@ export function definePricingTable(definition) {
         if (!PRICING_KEY.test(key) || escapeText(key) !== key) {
             throw new RangeError(`${fn}: rates key ${describe(key)} must look like provider:model (lowercase provider, no spaces)`);
         }
-        rates[key] = Object.freeze(readDatedRates(fn, key, rawRates[key]));
+        entries.push([key, rawRates[key]]);
+    }
+    const microsCount = entries.filter(([, entry]) => isMicrosShaped(entry)).length;
+    if (microsCount > 0 && microsCount < entries.length) {
+        throw new RangeError(`${fn}: rates mixes integer-micro entries (inputPerMTokMicros, ...) with per-million entries (inputPerMillion, ...); use one shape per table`);
+    }
+    if (microsCount > 0) {
+        return Object.freeze({ checkedAt: checkedAt, source, rates: buildMicrosRates(fn, entries) });
+    }
+    const rates = Object.create(null);
+    for (const [key, entry] of entries) {
+        rates[key] = Object.freeze(readDatedRates(fn, key, entry));
     }
     return Object.freeze({ checkedAt: checkedAt, source, rates: Object.freeze(rates) });
 }
-/**
- * Throw unless `table` was checked within the last `maxAgeDays` days of
- * `now`. Call it at startup or per request, with a `now` from your clock.
- *
- * A `checkedAt` up to one day in the future is allowed (a date written in a
- * time zone ahead of UTC); further in the future throws.
- *
- * @throws TypeError or RangeError for a malformed table, an invalid `now`, or
- *   a `maxAgeDays` that is not a finite number > 0; RangeError for a
- *   `checkedAt` more than a day in the future; Error when the table is older
- *   than `maxAgeDays` (the message names its date, age and source).
- */
-export function assertPricingFresh(table, now, maxAgeDays) {
+export function assertPricingFresh(table, nowOrOptions, maxAgeDaysArg) {
     const fn = 'assertPricingFresh';
     if (!isPlainRecord(table)) {
         throw new TypeError(`${fn}: table must come from definePricingTable`);
@@ -564,6 +613,20 @@ export function assertPricingFresh(table, now, maxAgeDays) {
     const checkedAt = table.checkedAt;
     const source = table.source;
     const checkedMs = readCheckedAt(fn, checkedAt);
+    let now = nowOrOptions;
+    let maxAgeDays = maxAgeDaysArg;
+    if (isPlainRecord(nowOrOptions)) {
+        if (maxAgeDaysArg !== undefined) {
+            throw new TypeError(`${fn}: pass maxAgeDays inside the options object, not as a third argument`);
+        }
+        for (const key of Reflect.ownKeys(nowOrOptions)) {
+            if (key !== 'now' && key !== 'maxAgeDays') {
+                throw new TypeError(`${fn}: options must have only now and maxAgeDays`);
+            }
+        }
+        now = Object.hasOwn(nowOrOptions, 'now') ? nowOrOptions.now : undefined;
+        maxAgeDays = Object.hasOwn(nowOrOptions, 'maxAgeDays') ? nowOrOptions.maxAgeDays : undefined;
+    }
     let nowMs;
     try {
         nowMs = Date.prototype.getTime.call(now);
