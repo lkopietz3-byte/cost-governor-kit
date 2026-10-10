@@ -45,6 +45,26 @@
   atomicity, duplicate suppression and durability belong to the caller's
   adapter.
 
+- `admitBeforeCall` never throws, never rejects, never retries and never
+  refunds. Only a validated `admitted` reply allows a call; a malformed request,
+  a store throw, a timeout or a malformed reply is `unavailable`. The request is
+  read once, the store gets a frozen copy, and the reply is read once and
+  checked against that copy (canonical `windowId` for the requested window,
+  `scopeKey` among the requested keys, no admit past a zero limit). The atomic
+  increment belongs to the caller's store. `createInMemoryAdmissionStore` is a
+  single-process test double: atomic within one process, windows never move
+  backwards, a limit only goes down within a window.
+- Amount-based reservations: without `amount`, the adapter request and the
+  `confirmReservation` call are exactly as before (one argument). With it, a
+  missing or `{ usage: 'unknown' }` settle records the full estimate, never 0,
+  and a malformed settle is `work_outcome_ambiguous` with the hold kept.
+- `estimateCostMicros` rounds up (after snapping floating-point noise within a
+  relative 1e-12). Provider mappers and dated pricing tables throw on unknown
+  keys; `lookupRatesOrThrow` has no fallback price; a dated table requires
+  `cacheReadPerMillion`.
+- `createCommitOnce` runs `fn` at most once per instance, ever; a failed commit
+  rejects for every caller and is not retried.
+
 ## Set up and verify
 
 Node 20 or later (CI's main job pins Node 26.3.0; 22 and 24 LTS are the
@@ -107,6 +127,10 @@ proves anything about concurrent Postgres sessions.
 
 - No real storage adapter is tested. Unit tests use single-process in-memory
   doubles; they prove the helpers' call sequencing, not atomicity.
+- The README's Postgres admission recipe runs on PGlite in `npm test`
+  (`src/admissionRecipePglite.test.ts`), a single connection: it proves the
+  recipe's logic, not that a cap holds under concurrent sessions or across
+  instances. The D1 and Redis recipes are not run by any test.
 - The reference SQL runs against PostgreSQL 18 via PGlite in `npm test` (CI
   covers it), a **single connection**: this proves the grant fix and the
   check/commit/window logic, not concurrent sessions or a live Supabase
@@ -129,10 +153,10 @@ proves anything about concurrent Postgres sessions.
 
 CI runs [`arethetypeswrong`](https://github.com/arethetypeswrong/arethetypeswrong.github.io)
 (`npm run attw`, which is `attw --pack . --ignore-rules cjs-resolves-to-esm`) against the
-packed tarball after the build step, and the release workflow runs it too. All four entry points
-(`.`, `./pricing`, `./preCallCeiling`, `./reserveConfirm`) resolve under `node10`, `node16`
+packed tarball after the build step, and the release workflow runs it too. All five entry points
+(`.`, `./pricing`, `./preCallCeiling`, `./reserveConfirm`, `./admission`) resolve under `node10`, `node16`
 (from CJS and from ESM) and `bundler`. `package.json` carries a `typesVersions` map for the
-three subpaths because `node10` resolution ignores `exports`; it must be kept in step with
+four subpaths because `node10` resolution ignores `exports`; it must be kept in step with
 `exports` when a subpath is added.
 
 The `cjs-resolves-to-esm` rule is ignored on purpose: this is an ESM-only package

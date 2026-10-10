@@ -35,6 +35,29 @@ import {
   type ReserveConfirmResult,
 } from 'cost-governor-kit/reserveConfirm';
 
+import {
+  admitBeforeCall,
+  admissionHttpStatus,
+  createInMemoryAdmissionStore,
+  type AdmissionDecision,
+  type AdmissionRequest,
+  type AdmissionScope,
+  type AdmissionStore,
+  type AdmissionUnavailableReason,
+  type AdmissionWindow,
+  type AdmitOutcome,
+} from 'cost-governor-kit/admission';
+import {
+  assertPricingFresh,
+  definePricingTable,
+  estimateCostMicros,
+  lookupRatesOrThrow,
+  usageFromAnthropic,
+  usageFromOpenAI,
+  type DatedPricingTable,
+} from 'cost-governor-kit/pricing';
+import { createCommitOnce, type CapacitySettlement, type CommitOnce } from 'cost-governor-kit/reserveConfirm';
+
 const table: PricingTable = { 'toy-model': { inputPerMillion: 3, outputPerMillion: 15 } };
 const rates: ModelRates = getRatesOrThrow(table, 'toy-model');
 // cacheReadPerMillion is optional on ModelRates and typed as a number.
@@ -107,5 +130,46 @@ async function advisory(): Promise<number | undefined> {
   return outcome.allowed ? outcome.result : outcome.result;
 }
 
+async function admission(): Promise<429 | 503 | null> {
+  const scopes: AdmissionScope[] = [{ key: 'global', limit: 10 }];
+  const window: AdmissionWindow = 'utc-hour';
+  const custom: AdmissionStore = {
+    admit: async (request: AdmissionRequest): Promise<AdmissionDecision> => ({ status: 'admitted', windowId: request.window }),
+  };
+  const outcome: AdmitOutcome = await admitBeforeCall(createInMemoryAdmissionStore({ now: () => new Date() }), { scopes, window, timeoutMs: 1000 });
+  if (outcome.status === 'unavailable') {
+    const reason: AdmissionUnavailableReason = outcome.reason;
+    void reason;
+  } else if (outcome.status === 'limited') {
+    const key: string = outcome.scopeKey;
+    void key;
+  }
+  // @ts-expect-error a scope needs a limit.
+  void admitBeforeCall(custom, { scopes: [{ key: 'k' }] });
+  return admissionHttpStatus(outcome, { perUserScopePrefixes: ['user:'] });
+}
+
+const dated: DatedPricingTable = definePricingTable({
+  checkedAt: '2026-10-01',
+  source: 'synthetic',
+  rates: { 'toy:model': { inputPerMillion: 3, outputPerMillion: 15, cacheReadPerMillion: 0.3 } },
+});
+// @ts-expect-error a dated table requires cacheReadPerMillion.
+definePricingTable({ checkedAt: '2026-10-01', source: 's', rates: { 'toy:model': { inputPerMillion: 3, outputPerMillion: 15 } } });
+assertPricingFresh(dated, new Date(), 30);
+const micros: number = estimateCostMicros(lookupRatesOrThrow(dated, 'toy:model'), usageFromAnthropic({}));
+const openAiUsage: UsageTokens = usageFromOpenAI({});
+const once: CommitOnce<number> = createCommitOnce(async () => 1);
+const commitState: 'idle' | 'pending' | 'committed' | 'failed' = once.state;
+const amountRequest: ReserveCapacityRequest = { key: 'k', limit: 10, operationId: 'o', amount: 5 };
+const settledLedger: CapacityReservationLedger = {
+  reserveCapacity: async (): Promise<ReserveCapacityResult> => ({ status: 'denied' }),
+  confirmReservation: async (reservation: CapacityReservation, settlement?: CapacitySettlement) =>
+    void [reservation.id, settlement?.amount, settlement?.usage],
+  releaseReservation: async (reservation: CapacityReservation) => void reservation.id,
+};
+const settleOutcome: CapacityWorkOutcome<number> = { status: 'succeeded', value: 1, settle: { actualAmount: 4 } };
+
+void [admission, micros, openAiUsage, commitState, amountRequest, settledLedger, settleOutcome];
 void reservationSubpath;
 void [strict, advisory, allowed, multiplier, logLine, reason];

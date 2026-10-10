@@ -50,6 +50,11 @@
       "types": "./dist/reserveConfirm.d.ts",
       "import": "./dist/reserveConfirm.js",
       "default": "./dist/reserveConfirm.js"
+    },
+    "./admission": {
+      "types": "./dist/admission.d.ts",
+      "import": "./dist/admission.js",
+      "default": "./dist/admission.js"
     }
   },
   "typesVersions": {
@@ -62,6 +67,9 @@
       ],
       "reserveConfirm": [
         "./dist/reserveConfirm.d.ts"
+      ],
+      "admission": [
+        "./dist/admission.d.ts"
       ]
     }
   },

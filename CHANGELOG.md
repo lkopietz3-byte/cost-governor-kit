@@ -6,6 +6,51 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Multi-scope admission control** (new subpath `cost-governor-kit/admission`,
+  also on the root): `admitBeforeCall(store, { scopes, window?, timeoutMs? })`
+  counts one attempt against every scope before a paid call, all or nothing,
+  through an `AdmissionStore` you write. It never throws, never retries and
+  never refunds: a store throw, a timeout (default 5,000 ms), a malformed reply
+  (wrong status, a missing or non-canonical `windowId`, a `scopeKey` that was
+  not requested, an admit past a zero limit) and a malformed request (blank or
+  duplicate keys, bad limits, no scopes) all resolve to
+  `{ status: 'unavailable', reason }`. `admissionHttpStatus(outcome, opts?)`
+  maps admitted to `null`, limited on a per-user scope to 429, and limited on a
+  global scope or unavailable to 503. `createInMemoryAdmissionStore({ now? })`
+  is a single-process reference store for unit tests only; it does not hold a
+  cap across instances. Also exports `DEFAULT_ADMISSION_TIMEOUT_MS` and the
+  `AdmissionScope`, `AdmissionWindow`, `AdmissionRequest`, `AdmissionDecision`,
+  `AdmissionStore`, `AdmitOutcome`, `AdmissionUnavailableReason`,
+  `AdmitBeforeCallRequest`, `AdmissionHttpStatusOptions` and
+  `InMemoryAdmissionStoreOptions` types.
+- README: "Admission control (the pattern most apps need)", with store recipes
+  for Postgres (tested on PGlite by `src/admissionRecipePglite.test.ts`, one
+  connection), Cloudflare D1 (`db.batch()` with a `CHECK` constraint; batch
+  rollback is Reported from Cloudflare's docs) and Redis/Upstash (one Lua
+  `EVAL`; not run). Each is a recipe the app owns and tests.
+- **Integer micro-dollar reservations:** an optional `amount` on
+  `ReserveCapacityRequest`; a succeeded work outcome may carry
+  `settle: { actualAmount } | { usage: 'unknown' }`, and `confirmReservation`
+  then receives a `CapacitySettlement` (`usage`, `amount`, `reservedAmount`).
+  Unknown usage keeps the full estimate. Without `amount`, behavior is
+  unchanged. New types `CapacitySettlement`, `CapacitySettle`.
+- `estimateCostMicros(rates, usage)`: integer micro-dollars, rounded up.
+- `usageFromAnthropic(usage)` and `usageFromOpenAI(usage)`: strict mappers from
+  provider usage JSON to `UsageTokens` that throw on unknown keys.
+  `usageFromAnthropic` prices `cache_creation_input_tokens` as 5-minute writes
+  when the `cache_creation` split is absent.
+- Dated price tables: `definePricingTable({ checkedAt, source, rates })` keyed
+  `provider:model`, `assertPricingFresh(table, now, maxAgeDays)` and
+  `lookupRatesOrThrow(table, key)`, which has no fallback price. New types
+  `DatedModelRates`, `PricingTableDefinition`, `DatedPricingTable`.
+- `createCommitOnce(fn)`: runs a commit at most once under concurrent and
+  repeated calls, for counting a stream on its first visible output. A failure
+  is surfaced to every caller and is final for that instance. New types
+  `CommitOnce`, `CommitOnceState`.
+- The observatory example vendors the new `admission` module too.
+
 ### Fixed
 
 - **`expiresAt` without a time zone is rejected (was read as local time).**
@@ -34,6 +79,10 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
+- **Behavior:** `withCapacityReservation` now reads `request.amount`. A request
+  object that already carried an unrelated `amount` that is not a safe integer
+  >= 1 (for example `null` or a string) now throws before the adapter is
+  called; before, the field was ignored.
 - **Behavior:** `expiresAt` values that used to be accepted now throw: no zone,
   non-ISO strings, impossible dates, a space instead of `T`, lowercase `t`/`z`,
   an offset without a colon (`+0000`) or with hours only (`+00`), and more than

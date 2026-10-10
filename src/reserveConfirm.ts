@@ -210,7 +210,40 @@ export interface ReserveCapacityRequest {
   limit: number;
   /** Non-blank idempotency key for one logical operation (see `key` for "blank"). Reuse it on every retry; a new id is a new operation. */
   operationId: string;
+  /**
+   * Optional size of this hold, in the same unit as `limit`: a safe integer
+   * >= 1, typically integer micro-dollars from {@link estimateCostMicros}
+   * (rounded up, so never 0 for real usage). When omitted, a hold is one unit,
+   * exactly as before, and the adapter receives no `amount` key.
+   *
+   * When present, the adapter must create the hold only when confirmed usage
+   * plus unexpired holds plus `amount` is at most `limit`, and
+   * `confirmReservation` receives a {@link CapacitySettlement} saying how much
+   * to record.
+   */
+  amount?: number;
 }
+
+/**
+ * How much a confirmed hold should record, passed to `confirmReservation` as
+ * its second argument only when the request had an `amount`.
+ *
+ * - `usage: 'reported'`: the work reported its real cost; record `amount`
+ *   (which can be more than `reservedAmount` when the estimate ran low; record
+ *   it anyway, never cap it at the hold).
+ * - `usage: 'unknown'`: the work could not report its cost (or did not say);
+ *   `amount` equals `reservedAmount`, the full estimate. Unknown is never zero.
+ */
+export interface CapacitySettlement {
+  usage: 'reported' | 'unknown';
+  /** What to record as confirmed usage. A safe integer >= 0. */
+  amount: number;
+  /** The request's `amount`: the size of the hold being confirmed. */
+  reservedAmount: number;
+}
+
+/** What `doTheWork` may report about its real cost when the request had an `amount`. */
+export type CapacitySettle = { actualAmount: number } | { usage: 'unknown' };
 
 /** What an adapter's `reserveCapacity` returns. */
 export type ReserveCapacityResult =
@@ -247,8 +280,12 @@ export interface CapacityReservationLedger {
    * `(key, operationId)` must never create a second hold.
    */
   reserveCapacity(request: ReserveCapacityRequest): Promise<ReserveCapacityResult>;
-  /** Turn a hold into confirmed usage. Must be idempotent. Called once, after `succeeded` work. */
-  confirmReservation(reservation: CapacityReservation): Promise<void>;
+  /**
+   * Turn a hold into confirmed usage. Must be idempotent. Called once, after
+   * `succeeded` work. `settlement` is passed only when the request had an
+   * `amount`; record `settlement.amount` (see {@link CapacitySettlement}).
+   */
+  confirmReservation(reservation: CapacityReservation, settlement?: CapacitySettlement): Promise<void>;
   /** Drop a hold without counting it. Must be idempotent. Called once, only after work reported `failed`. */
   releaseReservation(reservation: CapacityReservation): Promise<void>;
 }
@@ -260,7 +297,18 @@ export interface CapacityReservationLedger {
  * write), so the reservation remains held for reconciliation.
  */
 export type CapacityWorkOutcome<T> =
-  | { status: "succeeded"; value: T }
+  | {
+      status: "succeeded";
+      value: T;
+      /**
+       * Only read when the request had an `amount`: `{ actualAmount }` (a safe
+       * integer >= 0, for example `estimateCostMicros` of the real usage) or
+       * `{ usage: 'unknown' }`. Omitted means unknown, which records the full
+       * estimate. Any other value makes the outcome `work_outcome_ambiguous`.
+       * Ignored when the request had no `amount`.
+       */
+      settle?: CapacitySettle;
+    }
   | { status: "failed"; error: unknown };
 
 /** Result of {@link withCapacityReservation}. Every status except `denied` and `confirmed` needs reconciliation before any retry of paid work. */
@@ -268,7 +316,13 @@ export type CapacityReservationResult<T> =
   | { status: "denied"; reason?: string }
   | { status: "operation_in_progress"; reservation: CapacityReservation }
   | { status: "operation_terminal"; operationId: string; reason?: string }
-  | { status: "confirmed"; reservation: CapacityReservation; value: T }
+  | {
+      status: "confirmed";
+      reservation: CapacityReservation;
+      value: T;
+      /** Present only when the request had an `amount`: what `confirmReservation` was asked to record. */
+      settlement?: CapacitySettlement;
+    }
   | { status: "released_after_failure"; reservation: CapacityReservation; error: unknown }
   | {
       status: "release_failed";
@@ -286,6 +340,8 @@ export type CapacityReservationResult<T> =
       reservation: CapacityReservation;
       value: T;
       error: unknown;
+      /** Present only when the request had an `amount`. */
+      settlement?: CapacitySettlement;
     };
 
 /**
@@ -295,9 +351,11 @@ export type CapacityReservationResult<T> =
  * - It reads `request` once (its `limit`, `key` and `operationId`), validates
  *   that snapshot and throws, without calling the adapter, for a `request`
  *   that is not a plain or null-prototype object, a limit that is not a safe
- *   integer >= 0, or a blank key/operationId (empty, or only whitespace and
- *   invisible characters). The adapter receives a fresh
- *   `{ key, limit, operationId }` copy, and every later comparison uses the
+ *   integer >= 0, a blank key/operationId (empty, or only whitespace and
+ *   invisible characters), or an `amount` that is present but not a safe
+ *   integer >= 1. The adapter receives a fresh
+ *   `{ key, limit, operationId }` copy (plus `amount` only when it was given;
+ *   see {@link CapacitySettlement}), and every later comparison uses the
  *   validated values, so neither the caller changing its object nor the
  *   adapter editing its argument can change what a reservation is checked
  *   against.
@@ -345,8 +403,10 @@ export async function withCapacityReservation<T>(
   request: ReserveCapacityRequest,
   doTheWork: (reservation: CapacityReservation) => Promise<CapacityWorkOutcome<T>>,
 ): Promise<CapacityReservationResult<T>> {
-  const { key, limit, operationId } = readReserveCapacityRequest(request);
-  const decision: unknown = await ledger.reserveCapacity({ key, limit, operationId });
+  const { key, limit, operationId, amount } = readReserveCapacityRequest(request);
+  const decision: unknown = await ledger.reserveCapacity(
+    amount === undefined ? { key, limit, operationId } : { key, limit, operationId, amount },
+  );
   if (!decision || typeof decision !== 'object' || !('status' in decision)) {
     throw new TypeError("withCapacityReservation: adapter returned an invalid reservation decision");
   }
@@ -374,6 +434,7 @@ export async function withCapacityReservation<T>(
 
   const reservation = readReservation(decisionRecord.reservation, key, operationId);
   let parsed: ReturnType<typeof readCapacityWorkOutcome<T>>;
+  let settlement: CapacitySettlement | undefined;
   try {
     // The callback gets a frozen copy, so nothing it does can change the
     // snapshot that is confirmed or released below.
@@ -381,7 +442,10 @@ export async function withCapacityReservation<T>(
     // Reading the outcome runs the caller's getters or proxy traps. Paid work
     // has already happened, so a throw here must be the documented ambiguous
     // result with the hold kept, never an exception that loses the reservation.
-    parsed = readCapacityWorkOutcome<T>(outcome);
+    parsed = readCapacityWorkOutcome<T>(outcome, amount !== undefined);
+    if (parsed?.status === "succeeded" && amount !== undefined) {
+      settlement = readSettle(parsed.settle, amount);
+    }
   } catch (error) {
     return { status: "work_outcome_ambiguous", reservation, error };
   }
@@ -402,12 +466,45 @@ export async function withCapacityReservation<T>(
     }
   }
 
-  try {
-    await ledger.confirmReservation(reservation);
-    return { status: "confirmed", reservation, value: parsed.value };
-  } catch (error) {
-    return { status: "confirmation_failed", reservation, value: parsed.value, error };
+  if (settlement === undefined) {
+    try {
+      await ledger.confirmReservation(reservation);
+      return { status: "confirmed", reservation, value: parsed.value };
+    } catch (error) {
+      return { status: "confirmation_failed", reservation, value: parsed.value, error };
+    }
   }
+  try {
+    await ledger.confirmReservation(reservation, settlement);
+    return { status: "confirmed", reservation, value: parsed.value, settlement };
+  } catch (error) {
+    return { status: "confirmation_failed", reservation, value: parsed.value, error, settlement };
+  }
+}
+
+/** Turn the work's `settle` report into what the adapter records. Throws (making the outcome ambiguous) on anything malformed. */
+function readSettle(settle: unknown, reservedAmount: number): CapacitySettlement {
+  if (settle === undefined) {
+    return Object.freeze({ usage: "unknown", amount: reservedAmount, reservedAmount });
+  }
+  if (!isPlainRecord(settle)) {
+    throw new TypeError("withCapacityReservation: outcome.settle must be { actualAmount } or { usage: 'unknown' }");
+  }
+  const keys = Reflect.ownKeys(settle);
+  if (keys.length === 1 && keys[0] === "actualAmount") {
+    const actualAmount: unknown = settle.actualAmount;
+    if (typeof actualAmount !== "number" || !Number.isSafeInteger(actualAmount) || actualAmount < 0) {
+      throw new RangeError("withCapacityReservation: outcome.settle.actualAmount must be a non-negative safe integer");
+    }
+    return Object.freeze({ usage: "reported", amount: actualAmount, reservedAmount });
+  }
+  if (keys.length === 1 && keys[0] === "usage") {
+    const usage: unknown = settle.usage;
+    if (usage === "unknown") {
+      return Object.freeze({ usage: "unknown", amount: reservedAmount, reservedAmount });
+    }
+  }
+  throw new TypeError("withCapacityReservation: outcome.settle must be { actualAmount } or { usage: 'unknown' }");
 }
 
 /** Read the request once and validate what was read. Returns plain copies of the three fields. */
@@ -421,6 +518,7 @@ function readReserveCapacityRequest(request: ReserveCapacityRequest): ReserveCap
   const limit: unknown = request.limit;
   const key: unknown = request.key;
   const operationId: unknown = request.operationId;
+  const amount: unknown = request.amount;
   if (typeof limit !== "number") {
     throw new TypeError("withCapacityReservation: limit must be a non-negative safe integer");
   }
@@ -439,7 +537,16 @@ function readReserveCapacityRequest(request: ReserveCapacityRequest): ReserveCap
   if (isBlank(operationId)) {
     throw new RangeError("withCapacityReservation: operationId must be a non-empty string");
   }
-  return { key, limit, operationId };
+  if (amount === undefined) {
+    return { key, limit, operationId };
+  }
+  if (typeof amount !== "number") {
+    throw new TypeError("withCapacityReservation: amount must be a safe integer >= 1 when present");
+  }
+  if (!Number.isSafeInteger(amount) || amount < 1) {
+    throw new RangeError("withCapacityReservation: amount must be a safe integer >= 1 when present");
+  }
+  return { key, limit, operationId, amount };
 }
 
 const EXPIRES_AT_MESSAGE =
@@ -497,15 +604,113 @@ function readReservation(
 /** Read a work outcome once. Returns `undefined` for anything that is not a well-formed outcome. */
 function readCapacityWorkOutcome<T>(
   value: unknown,
-): { status: "succeeded"; value: T } | { status: "failed"; error: unknown } | undefined {
+  readSettleField = false,
+): { status: "succeeded"; value: T; settle: unknown } | { status: "failed"; error: unknown } | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   const status: unknown = record.status;
   if (status === "succeeded") {
-    return Object.prototype.hasOwnProperty.call(record, "value") ? { status, value: record.value as T } : undefined;
+    if (!Object.prototype.hasOwnProperty.call(record, "value")) return undefined;
+    const outcomeValue = record.value as T;
+    // Read only for an `amount` request, so every other outcome is read exactly as before.
+    const settle: unknown =
+      readSettleField && Object.prototype.hasOwnProperty.call(record, "settle") ? record.settle : undefined;
+    return { status, value: outcomeValue, settle };
   }
   if (status === "failed") {
     return Object.prototype.hasOwnProperty.call(record, "error") ? { status, error: record.error } : undefined;
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Commit once
+// ---------------------------------------------------------------------------
+
+/** Where a {@link CommitOnce} is: never called, running, done, or failed for good. */
+export type CommitOnceState = "idle" | "pending" | "committed" | "failed";
+
+/** A function that runs its commit at most once; see {@link createCommitOnce}. */
+export interface CommitOnce<T> {
+  /** Run the commit (first call) or join it (every later call). Every caller gets the same promise. */
+  (): Promise<T>;
+  /**
+   * `idle` until the first call, then `pending`, then `committed` or `failed`.
+   * It leaves `pending` when the shared promise settles (a microtask after
+   * `fn` returns, even for a synchronous `fn`), so read it after awaiting.
+   */
+  readonly state: CommitOnceState;
+}
+
+/**
+ * Wrap a commit (for example `commitUsage`) so it runs at most once, however
+ * many times and however concurrently it is called. Made for counting a
+ * streamed call on its FIRST visible output: call the returned function from
+ * every chunk handler, and the usage is recorded exactly once, as soon as the
+ * user has seen something.
+ *
+ * - The first call runs `fn` synchronously and returns a promise of its
+ *   result. Every other call, concurrent or later, returns that same promise
+ *   and never runs `fn` again.
+ * - A failure is surfaced, not swallowed: if `fn` throws or rejects, the
+ *   shared promise rejects with that error for every caller, including later
+ *   ones, and `state` becomes `failed`.
+ * - **A failed commit cannot be retried through the same instance.** `fn`
+ *   runs at most once, ever. A commit can fail after its write landed (a lost
+ *   reply), so retrying automatically could count the call twice. Decide in
+ *   your own code whether to reconcile or create a new `createCommitOnce` for
+ *   a deliberate retry.
+ * - Await the returned promise to see a failure. The instance tracks `state`
+ *   with its own handler, so a fire-and-forget call does not produce an
+ *   unhandled rejection; it is not silent either, because `state` stays
+ *   `failed` and every later call rejects with the same error.
+ *
+ * It keeps no timers and no global state; each call to `createCommitOnce`
+ * makes an independent instance.
+ *
+ * @example
+ *   const countOnce = createCommitOnce(() => ledger.commitUsage(`${userId}:${today}`));
+ *   for await (const chunk of stream) {
+ *     if (chunk.text) await countOnce(); // counted on first visible output, once
+ *     write(chunk.text);
+ *   }
+ *   // countOnce.state === 'idle' here means nothing was shown and nothing was counted.
+ *
+ * @throws TypeError (synchronously, at creation) when `fn` is not a function.
+ */
+export function createCommitOnce<T>(fn: () => T | PromiseLike<T>): CommitOnce<T> {
+  if (typeof fn !== "function") {
+    throw new TypeError("createCommitOnce: fn must be a function");
+  }
+  let state: CommitOnceState = "idle";
+  let shared: Promise<T> | undefined;
+  const commit = (): Promise<T> => {
+    if (shared) return shared;
+    let resolveShared!: (value: T | PromiseLike<T>) => void;
+    let rejectShared!: (reason: unknown) => void;
+    // Assign the shared promise before running fn, so a re-entrant call from
+    // inside fn joins it instead of running fn a second time.
+    shared = new Promise<T>((resolve, reject) => {
+      resolveShared = resolve;
+      rejectShared = reject;
+    });
+    state = "pending";
+    const settled = shared.then(
+      () => {
+        state = "committed";
+      },
+      () => {
+        state = "failed";
+      },
+    );
+    void settled;
+    try {
+      resolveShared(fn());
+    } catch (error) {
+      rejectShared(error);
+    }
+    return shared;
+  };
+  Object.defineProperty(commit, "state", { get: () => state, enumerable: true });
+  return commit as CommitOnce<T>;
 }

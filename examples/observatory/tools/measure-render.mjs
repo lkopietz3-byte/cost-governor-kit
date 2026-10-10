@@ -36,6 +36,7 @@ const SERVED_SOURCE_FILES = [
   'vendor/cost-governor-kit/LICENSE', 'vendor/cost-governor-kit/index.js',
   'vendor/cost-governor-kit/internal.js', 'vendor/cost-governor-kit/preCallCeiling.js',
   'vendor/cost-governor-kit/pricing.js', 'vendor/cost-governor-kit/reserveConfirm.js',
+  'vendor/cost-governor-kit/admission.js',
   'vendor/cost-governor-kit/source.json', 'tools/verify-browser.mjs',
 ];
 const sha = value => createHash('sha256').update(value).digest('hex');
