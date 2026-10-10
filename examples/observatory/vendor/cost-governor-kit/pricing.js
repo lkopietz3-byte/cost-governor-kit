@@ -265,7 +265,8 @@ export function getRatesOrThrow(table, model) {
  * these values never under-counts. A sum within floating-point noise of a
  * whole number (a relative 1e-12, at least 1e-9 and at most 1e-6 of a
  * micro-dollar) is taken as that number, so
- * `3 x 0.1`-style binary error does not add a micro-dollar. Zero usage is 0.
+ * `3 x 0.1`-style binary error does not add a micro-dollar. Zero usage is 0;
+ * any positive cost, however small, is at least 1.
  *
  * Because it rounds up, `estimateCostMicros(r, u)` can be one more than
  * `estimateCostUsd(r, u) * 1e6`.
@@ -282,7 +283,10 @@ export function estimateCostMicros(rates, usage) {
     // Snap only floating-point noise: a relative 1e-12, never more than 1e-6 of
     // a micro-dollar, so a real fraction is always rounded up.
     const tolerance = Math.min(1e-6, Math.max(1e-9, micros * 1e-12));
-    const result = Math.abs(micros - nearest) <= tolerance ? nearest : Math.ceil(micros);
+    let result = Math.abs(micros - nearest) <= tolerance ? nearest : Math.ceil(micros);
+    // A positive cost is never free, however small: never snap it to 0.
+    if (result === 0 && micros > 0)
+        result = 1;
     if (!Number.isSafeInteger(result)) {
         throw new Error('estimateCostMicros: calculated cost must remain a safe integer');
     }

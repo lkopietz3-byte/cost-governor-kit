@@ -2,27 +2,27 @@
   "schema": "threshold-sdk-source-v1",
   "package": "cost-governor-kit",
   "version": "0.2.1",
-  "revision": "7cf1285dbe42061015b1757c95765dd92b2fe394",
+  "revision": "6bb2e33daeddde14c2ea53a592b18151dd204fbf",
   "sourceDirty": false,
-  "generatedAt": "2026-10-10T21:15:39.961Z",
+  "generatedAt": "2026-10-10T21:22:41.163Z",
   "compiler": "typescript 5.9.3",
   "method": "Fresh ES2022 module transpilation from the owning src; no dist cache.",
   "sources": {
     "src/index.ts": "bedbc7247f12687cff1b22c497a786825a20c4e100751ba2e36718b4f764e8d3",
     "src/internal.ts": "f054453220f6b39efc2528b1eed81209147162a82fdabaf43300cd38598c563f",
-    "src/pricing.ts": "45df1f7e3c0f72abf6267667634de4157777d8e6c05db28e3ce4693db988b4f4",
+    "src/pricing.ts": "f550290cde0b058d069faaae2af21d9ae3578994c3569f3de6c9f969b9dbd255",
     "src/preCallCeiling.ts": "531b71b0e502fe7589c41f9f9b68d457c53f799e695f21433d0445a1a9439051",
     "src/reserveConfirm.ts": "a10a3810ed36ef0ea47f1458ad75758ea3685c547b2a2a2d41fca7236c4b0ecd",
-    "src/admission.ts": "9907ec6f3a0254beed2aca41b52a05e33ba8f3a634ce07b1cd60fc4a507bdbf6",
+    "src/admission.ts": "add2b43980059d756bd371438585eaa448d7048e6f8b39f706d4d6f6d0949595",
     "LICENSE": "07605f7cd19dfee07729db4294313d725e3a0ea61c77056c0ebe53669c274cf3"
   },
   "outputs": {
     "index.js": "d9aaf550afb07837f702bc4bf40e313931e9be3126b43d52cb00c7fa00b157ba",
     "internal.js": "40671c6ab02fb207e77b4a21d03bb776043218949f9fbcfa5b06e1e9d3748b46",
-    "pricing.js": "4d792d6d6a911b891c21bc2af23412db1a70c624a92daa0804cc40c501a2a315",
+    "pricing.js": "b73af32b8d2fb7b3b6ee09e23d97ad9945139ed55eb171ae43e6000d280c2b9f",
     "preCallCeiling.js": "87ee976e6bd65230eadfed0e7f7fb3d22706597377944a16eac3a85f6388d3b2",
     "reserveConfirm.js": "3ab45dfde8865977b1c9132137e6cb9cb9b4d15a43bab17481264c12f945f316",
-    "admission.js": "edfa48e70b0d32821f566fa73791834d574e658311109e53293d997b32aeeb94",
+    "admission.js": "4a6d042c9661495a1df190efd668d21ee009f5d78c4fe85b3e9ca8d0787a1a59",
     "LICENSE": "07605f7cd19dfee07729db4294313d725e3a0ea61c77056c0ebe53669c274cf3"
   }
 }
