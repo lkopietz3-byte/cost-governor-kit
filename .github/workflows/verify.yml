@@ -75,3 +75,54 @@ jobs:
         run: npm test
       - name: Verify the installable package
         run: npm run verify:package
+
+  postgres:
+    name: Real Postgres 17 concurrency (test:postgres)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: cost_governor_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d cost_governor_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      COST_GOVERNOR_PG_URL: postgresql://postgres:postgres@localhost:5432/cost_governor_test
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Set up Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '26.3.0'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci --no-audit
+      - name: Run the concurrency suite against the Postgres service
+        run: npm run test:postgres -- --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/postgres-report.json"
+      - name: Fail if the suite was skipped or ran nothing
+        # The suite is describe.skip when COST_GOVERNOR_PG_URL is unset, and a
+        # skipped suite still exits 0. Require tests to have run and passed.
+        env:
+          REPORT: ${{ runner.temp }}/postgres-report.json
+        run: |
+          node -e "
+            const r = JSON.parse(require('fs').readFileSync(process.env.REPORT, 'utf8'));
+            console.log(JSON.stringify({ total: r.numTotalTests, passed: r.numPassedTests, failed: r.numFailedTests, pending: r.numPendingTests, todo: r.numTodoTests }));
+            if (!(r.numTotalTests > 0) || r.numPassedTests !== r.numTotalTests || r.numPendingTests > 0 || r.numTodoTests > 0 || r.numFailedTests > 0) {
+              console.error('::error::test:postgres did not run every test: skipped, pending, failed or empty');
+              process.exit(1);
+            }
+          "
