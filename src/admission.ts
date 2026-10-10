@@ -136,8 +136,11 @@ const WINDOWS: readonly AdmissionWindow[] = ['utc-day', 'utc-hour'];
  *   scopes, so neither the caller nor the store can change what the reply is
  *   checked against.
  * - A throw or rejection is `store_error`; no answer within `timeoutMs` is
- *   `timeout` (the store may still commit; the admission then counts, which is
- *   the safe direction).
+ *   `timeout`. The deadline is measured from just before the store is called
+ *   (`performance.now()`), so a store that blocks the event loop and then
+ *   answers late is also `timeout`, even if it said `admitted`. That late
+ *   admission is discarded, fail closed, and the store may have counted it:
+ *   admission is never refunded.
  * - The reply is read once. It is `malformed_reply` unless it is exactly
  *   `{ status: 'admitted', windowId }` or
  *   `{ status: 'limited', scopeKey, windowId }` where `windowId` is a real
@@ -179,6 +182,10 @@ export async function admitBeforeCall(
 
   let reply: unknown;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // Taken before the store runs: synchronous work inside admit blocks the
+  // event loop, so the timer below cannot fire until it is done. The deadline
+  // check after the race catches a reply that arrived late anyway.
+  const deadline = performance.now() + timeoutMs;
   try {
     const call = new Promise<unknown>((resolve, reject) => {
       // A synchronous throw from admit becomes a rejection here.
@@ -188,7 +195,7 @@ export async function admitBeforeCall(
       timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
     });
     reply = await Promise.race([call, timedOut]);
-    if (reply === TIMED_OUT) {
+    if (reply === TIMED_OUT || performance.now() > deadline) {
       // Keep a late rejection from surfacing as an unhandled rejection.
       call.catch(() => undefined);
       return { status: 'unavailable', reason: 'timeout' };
@@ -339,8 +346,16 @@ function readScopes(fn: string, rawScopes: unknown): readonly AdmissionScope[] {
   if (!Array.isArray(rawScopes)) {
     throw new TypeError(`${fn}: scopes must be an array of { key, limit }`);
   }
-  // Copy first (one read of length and each element), then validate the copy.
-  const items: unknown[] = Array.from(rawScopes as unknown[]);
+  // Copy first, then validate the copy. Read `length` exactly once and each
+  // element once by index: Array.from would iterate, re-reading `length` on
+  // every step, so a proxy could shrink the array and drop a scope.
+  const source = rawScopes as unknown[];
+  const length: unknown = source.length;
+  if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) {
+    throw new TypeError(`${fn}: scopes must be an array of { key, limit }`);
+  }
+  const items: unknown[] = [];
+  for (let index = 0; index < length; index++) items.push(source[index]);
   if (items.length === 0) {
     // Admitting against no scopes would count nothing and allow everything.
     throw new RangeError(`${fn}: scopes must contain at least one scope`);

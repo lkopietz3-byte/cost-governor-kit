@@ -206,8 +206,11 @@ are static configuration.
   than thrown, so a route handler's generic `catch` cannot turn one into an
   unguarded paid call. Log `cause` and your tests will find them.
 - `reason: 'store_error'`: the store threw or rejected (`cause` is what it threw).
-- `reason: 'timeout'`: no answer within `timeoutMs` (default 5,000 ms). The
-  store may still commit; the admission then counts, which is the safe direction.
+- `reason: 'timeout'`: no answer within `timeoutMs` (default 5,000 ms),
+  measured from just before the store is called. A store that blocks the event
+  loop and answers late is also a timeout, even if it said `admitted`: the late
+  admission is discarded, fail closed. The store may still have counted it;
+  admission is never refunded, so that errs toward over-counting.
 - `reason: 'malformed_reply'`: anything but `{ status: 'admitted', windowId }`
   or `{ status: 'limited', scopeKey, windowId }`, where `windowId` is a real UTC
   `YYYY-MM-DD` (day) or `YYYY-MM-DDTHH` (hour) matching the requested window,
@@ -215,7 +218,8 @@ are static configuration.
   if any requested limit is 0 (a store that admits past a zero limit is not
   enforcing limits).
 
-The request is read once and validated, and the store gets a frozen copy, so
+The request is read once and validated (the scopes array's `length` once, then
+each element once by index), and the store gets a frozen copy, so
 neither side can change what the reply is checked against. The store is called
 exactly once; `admitBeforeCall` never retries. **Admission is not refunded on
 failure, by design.**
@@ -615,9 +619,9 @@ micro-dollars (1 = $0.000001) and **rounded up**, for budgets and reservations
 that count integers. A call that costs a fraction of a micro-dollar counts as 1,
 never 0, so a running total of these values never under-counts. A sum within
 floating-point noise of a whole number (relative 1e-12, at most 0.000001 of a
-micro-dollar) is taken as that number,
-so `8,000 x 3 x 0.1` (which is `2400.0000000000005` in binary) does not add a
-micro-dollar: the quickstart call is exactly `19500`. Because it rounds up, it
+micro-dollar) is taken as that number, so `8,000 x 3 x 0.1` (which is
+`2400.0000000000005` in binary) does not add a micro-dollar: the quickstart
+call is exactly `19500`. A positive cost never snaps to 0; it is at least 1. Because it rounds up, it
 can be one more than `estimateCostUsd(...) * 1e6`.
 
 ### Provider usage mappers: `usageFromAnthropic(usage)`, `usageFromOpenAI(usage)`

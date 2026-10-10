@@ -18,7 +18,10 @@ All notable changes to this project are documented here. The format follows
   duplicate keys, bad limits, no scopes) all resolve to
   `{ status: 'unavailable', reason }`. `admissionHttpStatus(outcome, opts?)`
   maps admitted to `null`, limited on a per-user scope to 429, and limited on a
-  global scope or unavailable to 503. `createInMemoryAdmissionStore({ now? })`
+  global scope or unavailable to 503. A reply that arrives after the
+  deadline (measured before the store is called, so event-loop blocking counts)
+  is a timeout even if it says admitted; the scopes array's `length` is read
+  once. `createInMemoryAdmissionStore({ now? })`
   is a single-process reference store for unit tests only; it does not hold a
   cap across instances. Also exports `DEFAULT_ADMISSION_TIMEOUT_MS` and the
   `AdmissionScope`, `AdmissionWindow`, `AdmissionRequest`, `AdmissionDecision`,
@@ -36,7 +39,8 @@ All notable changes to this project are documented here. The format follows
   then receives a `CapacitySettlement` (`usage`, `amount`, `reservedAmount`).
   Unknown usage keeps the full estimate. Without `amount`, behavior is
   unchanged. New types `CapacitySettlement`, `CapacitySettle`.
-- `estimateCostMicros(rates, usage)`: integer micro-dollars, rounded up.
+- `estimateCostMicros(rates, usage)`: integer micro-dollars, rounded up; any
+  positive cost is at least 1.
 - `usageFromAnthropic(usage)` and `usageFromOpenAI(usage)`: strict mappers from
   provider usage JSON to `UsageTokens` that throw on unknown keys.
   `usageFromAnthropic` prices `cache_creation_input_tokens` as 5-minute writes

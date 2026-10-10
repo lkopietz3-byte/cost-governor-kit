@@ -48,7 +48,9 @@
 - `admitBeforeCall` never throws, never rejects, never retries and never
   refunds. Only a validated `admitted` reply allows a call; a malformed request,
   a store throw, a timeout or a malformed reply is `unavailable`. The request is
-  read once, the store gets a frozen copy, and the reply is read once and
+  read once (the scopes array's `length` once, then each element by index),
+  the store gets a frozen copy, a reply after the deadline (taken before the
+  store runs) is a timeout even if it says admitted, and the reply is read once and
   checked against that copy (canonical `windowId` for the requested window,
   `scopeKey` among the requested keys, no admit past a zero limit). The atomic
   increment belongs to the caller's store. `createInMemoryAdmissionStore` is a
@@ -59,7 +61,7 @@
   missing or `{ usage: 'unknown' }` settle records the full estimate, never 0,
   and a malformed settle is `work_outcome_ambiguous` with the hold kept.
 - `estimateCostMicros` rounds up (after snapping floating-point noise within a
-  relative 1e-12). Provider mappers and dated pricing tables throw on unknown
+  relative 1e-12, at most 1e-6 micro-dollars), and a positive cost is never 0. Provider mappers and dated pricing tables throw on unknown
   keys; `lookupRatesOrThrow` has no fallback price; a dated table requires
   `cacheReadPerMillion`.
 - `createCommitOnce` runs `fn` at most once per instance, ever; a failed commit

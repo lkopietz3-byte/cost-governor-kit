@@ -551,6 +551,11 @@ describe('estimateCostMicros', () => {
     expect(estimateCostMicros({ inputPerMillion: 1.0000000000004, outputPerMillion: 0 }, { inputTokens: 1e12 })).toBe(1e12 + 1);
   });
 
+  it('a positive cost below the snap tolerance is 1 micro-dollar, never 0 (review finding)', () => {
+    expect(estimateCostMicros({ inputPerMillion: 1e-10, outputPerMillion: 0 }, { inputTokens: 1 })).toBe(1);
+    expect(estimateCostMicros({ inputPerMillion: 0, outputPerMillion: 1e-12 }, { outputTokens: 1 })).toBe(1);
+  });
+
   it('zero usage is 0, and every result is a safe integer', () => {
     expect(estimateCostMicros(rates, {})).toBe(0);
     expect(Number.isSafeInteger(estimateCostMicros(rates, { inputTokens: 123_457, outputTokens: 9_999 }))).toBe(true);
@@ -1032,6 +1037,42 @@ describe('adversarial probes', () => {
     for (const key of ['__proto__', 'constructor', 'toString', 'hasOwnProperty']) {
       expect(await admitTimes(store, 2, [{ key, limit: 1 }])).toEqual(['admitted', 'limited']);
     }
+  });
+
+  it('false ADMIT probe 15 (review finding): a scopes proxy whose length shrinks between reads cannot drop a scope', async () => {
+    const backing = [global(10), user('a', 0)];
+    let lengthReads = 0;
+    const shrinking = new Proxy(backing, {
+      get(target, prop, receiver) {
+        if (prop === 'length') {
+          lengthReads++;
+          return lengthReads === 1 ? 2 : 1;
+        }
+        return Reflect.get(target, prop, receiver) as unknown;
+      },
+    });
+    const store = scripted(() => Promise.resolve({ status: 'admitted', windowId: DAY }));
+    const outcome = await admitBeforeCall(store, { scopes: shrinking });
+    // The zero-limit user scope must still be there, so an "admitted" reply is impossible.
+    expect(outcome).toMatchObject({ status: 'unavailable', reason: 'malformed_reply' });
+    expect(lengthReads).toBe(1);
+    expect(store.calls[0]?.scopes).toEqual([
+      { key: 'explain:global', limit: 10 },
+      { key: 'explain:user:a', limit: 0 },
+    ]);
+  });
+
+  it('false ADMIT probe 16 (review finding): a store that blocks the event loop past timeoutMs is a timeout, even if it says admitted', async () => {
+    const store = scripted(() => {
+      const until = performance.now() + 30;
+      while (performance.now() < until) {
+        // Synchronous work inside admit, before any timer can fire.
+      }
+      return Promise.resolve({ status: 'admitted', windowId: DAY });
+    });
+    const outcome = await admitBeforeCall(store, { scopes: [global(5)], timeoutMs: 5 });
+    expect(outcome).toEqual({ status: 'unavailable', reason: 'timeout' });
+    expect(store.calls).toHaveLength(1);
   });
 
   it('false DENY probe 1: limits on different scopes do not leak into each other (no shared counter by accident)', async () => {
