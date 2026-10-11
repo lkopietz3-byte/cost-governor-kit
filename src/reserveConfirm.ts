@@ -755,3 +755,253 @@ export function createCommitOnce<T>(fn: () => T | PromiseLike<T>): CommitOnce<T>
   Object.defineProperty(commit, "attempt", { value: attempt, enumerable: true });
   return commit as CommitOnce<T>;
 }
+
+// ---------------------------------------------------------------------------
+// Several scopes at once: a per-user cap inside a global cap
+// ---------------------------------------------------------------------------
+
+/** One capped scope of {@link withCapacityReservations}: a ledger key and its limit. */
+export interface ReservationScope {
+  key: string;
+  limit: number;
+}
+
+/** Input to {@link withCapacityReservations}. */
+export interface ReserveScopesRequest {
+  /**
+   * 1 to 8 scopes with distinct keys, for example the user's daily dollar cap
+   * and the global one. They are reserved in this order, so list the scope you
+   * most want named in a refusal first.
+   */
+  scopes: readonly ReservationScope[];
+  /** Non-blank idempotency key for one logical operation. It is used on every scope. */
+  operationId: string;
+  /** Size of the hold on every scope, a safe integer >= 1 (typically micro-dollars). */
+  amount: number;
+}
+
+/** Result of {@link withCapacityReservations}. */
+export type CapacityReservationsResult<T> =
+  | {
+      status: 'confirmed';
+      /** What `doTheWork` returned. */
+      value: T;
+      /** What every scope's `confirmReservation` was asked to record. */
+      settlement: CapacitySettlement;
+      /** Present only when the reported actual amount was more than the hold. */
+      overrunAmount?: number;
+      /** The hold on each scope, in request order. */
+      reservations: readonly CapacityReservation[];
+    }
+  | {
+      /** A scope's ledger did not give a hold; `doTheWork` did not run and every hold taken before it was released. */
+      status: 'refused';
+      refusal: 'denied' | 'operation_in_progress' | 'operation_terminal';
+      scopeKey: string;
+      reason?: string;
+    }
+  | {
+      /** `doTheWork` reported `failed` (no charge): every hold was released. */
+      status: 'released_after_failure';
+      error: unknown;
+    }
+  | {
+      /**
+       * At least one hold is still in place and needs your reconciliation:
+       * work whose outcome is unknown, a failed confirm, or a failed release.
+       * `result` is that scope's own result from {@link withCapacityReservation}.
+       * Treat paid work as possibly done; do not retry it.
+       */
+      status: 'needs_reconciliation';
+      scopeKey: string;
+      result: CapacityReservationResult<unknown>;
+    };
+
+type ScopedInner<T> =
+  | { kind: 'done'; outcome: { status: 'succeeded'; value: T; settle: unknown } | { status: 'failed'; error: unknown } }
+  | { kind: 'confirmed'; value: T; settlement: CapacitySettlement; overrunAmount?: number }
+  | { kind: 'refused'; refusal: 'denied' | 'operation_in_progress' | 'operation_terminal'; scopeKey: string; reason?: string }
+  | { kind: 'failed'; error: unknown }
+  | { kind: 'problem'; scopeKey: string; result: CapacityReservationResult<unknown> };
+
+const MAX_RESERVATION_SCOPES = 8;
+
+/**
+ * Reserve the same amount on several scopes, run paid work once, and settle
+ * every scope: the daily-dollars-per-user-and-global pattern.
+ *
+ * It is {@link withCapacityReservation} nested once per scope, in request
+ * order, so everything that function guarantees holds for each scope: work runs
+ * at most once and only after EVERY scope gave a hold; it never retries; a
+ * thrown or malformed outcome keeps every hold; confirm and release are each
+ * called at most once per scope. What it adds is the bookkeeping nobody should
+ * hand-write:
+ *
+ * - If a later scope refuses, the holds already taken are released (no paid
+ *   work ran), and the result names the refusing scope.
+ * - If the work fails (`failed`), every hold is released.
+ * - If the work succeeds, every scope is confirmed with the same settlement:
+ *   the reported `actualAmount`, or the full estimate for `{ usage: 'unknown' }`
+ *   (a missing `settle` means unknown). An actual above the hold is recorded as
+ *   is and reported as `overrunAmount`.
+ * - Anything unresolved (ambiguous work, a failed confirm, a failed release)
+ *   returns `needs_reconciliation` with the scope's own result, and the holds
+ *   stay in place.
+ *
+ * Holds are taken one ledger round trip per scope, so this is not atomic across
+ * scopes: a refusal on the second scope briefly held capacity on the first.
+ * That errs toward refusing, never toward overspending.
+ *
+ * Invalid input (no scopes, more than 8, duplicate or blank keys, a bad limit
+ * or amount) throws before the ledger is called. A ledger that rejects on the
+ * first scope propagates the rejection, with no work run; on a later scope the
+ * earlier holds are kept and the result is `needs_reconciliation`.
+ *
+ * `doTheWork` receives a frozen array of the holds, in request order.
+ */
+export async function withCapacityReservations<T>(
+  ledger: CapacityReservationLedger,
+  request: ReserveScopesRequest,
+  doTheWork: (reservations: readonly CapacityReservation[]) => Promise<CapacityWorkOutcome<T>>,
+): Promise<CapacityReservationsResult<T>> {
+  const fn = 'withCapacityReservations';
+  if (!isPlainRecord(request)) {
+    throw new TypeError(`${fn}: request must be an object with scopes, operationId and amount (a plain object)`);
+  }
+  const rawScopes: unknown = request.scopes;
+  const operationId: unknown = request.operationId;
+  const amount: unknown = request.amount;
+  if (!Array.isArray(rawScopes)) {
+    throw new TypeError(`${fn}: scopes must be an array of { key, limit }`);
+  }
+  const count = rawScopes.length;
+  if (count < 1 || count > MAX_RESERVATION_SCOPES) {
+    throw new RangeError(`${fn}: scopes must have between 1 and ${MAX_RESERVATION_SCOPES} entries`);
+  }
+  if (amount === undefined) {
+    throw new TypeError(`${fn}: amount is required: a safe integer >= 1`);
+  }
+  const scopes: Array<{ key: string; limit: number; operationId: string; amount: number }> = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < count; i++) {
+    const scope: unknown = rawScopes[i];
+    if (!isPlainRecord(scope)) {
+      throw new TypeError(`${fn}: scopes[${i}] must be a plain { key, limit } object`);
+    }
+    const read = readReserveCapacityRequest({
+      key: scope.key as string,
+      limit: scope.limit as number,
+      operationId: operationId as string,
+      amount: amount as number,
+    });
+    if (seen.has(read.key)) {
+      throw new RangeError(`${fn}: scopes must have distinct keys`);
+    }
+    seen.add(read.key);
+    scopes.push({ key: read.key, limit: read.limit, operationId: read.operationId, amount: read.amount as number });
+  }
+  if (typeof doTheWork !== 'function') {
+    throw new TypeError(`${fn}: doTheWork must be a function`);
+  }
+
+  const held: CapacityReservation[] = [];
+
+  async function level(i: number): Promise<ScopedInner<T>> {
+    const scope = scopes[i] as (typeof scopes)[number];
+    let deeperProblem: ScopedInner<T> | undefined;
+    const result = await withCapacityReservation<ScopedInner<T>>(ledger, scope, async (reservation) => {
+      held[i] = reservation;
+      let inner: ScopedInner<T>;
+      if (i + 1 < scopes.length) {
+        inner = await level(i + 1);
+      } else {
+        // The innermost level runs the paid work. The outcome is read once here;
+        // a throw, a getter that throws or a malformed outcome keeps every hold.
+        const outcome: unknown = await doTheWork(Object.freeze([...held]));
+        inner = { kind: 'done', outcome: readScopedOutcome<T>(outcome) };
+      }
+      switch (inner.kind) {
+        case 'done':
+          return inner.outcome.status === 'succeeded'
+            ? { status: 'succeeded', value: inner, settle: inner.outcome.settle as CapacitySettle | undefined }
+            : { status: 'failed', error: inner };
+        case 'confirmed':
+          return { status: 'succeeded', value: inner, settle: settleOf(inner.settlement) };
+        case 'refused':
+        case 'failed':
+          return { status: 'failed', error: inner };
+        case 'problem':
+          deeperProblem = inner;
+          throw new Error(`${fn}: a deeper scope needs reconciliation, so this hold is kept`);
+      }
+    });
+
+    switch (result.status) {
+      case 'denied':
+        return { kind: 'refused', refusal: 'denied', scopeKey: scope.key, ...(result.reason === undefined ? {} : { reason: result.reason }) };
+      case 'operation_in_progress':
+        return { kind: 'refused', refusal: 'operation_in_progress', scopeKey: scope.key };
+      case 'operation_terminal':
+        return { kind: 'refused', refusal: 'operation_terminal', scopeKey: scope.key, ...(result.reason === undefined ? {} : { reason: result.reason }) };
+      case 'confirmed': {
+        const inner = result.value;
+        const value = inner.kind === 'done' ? (inner.outcome as { value: T }).value : (inner as { value: T }).value;
+        return {
+          kind: 'confirmed',
+          value,
+          settlement: result.settlement as CapacitySettlement,
+          ...(result.overrunAmount === undefined ? {} : { overrunAmount: result.overrunAmount }),
+        };
+      }
+      case 'released_after_failure': {
+        const inner = result.error as ScopedInner<T>;
+        if (inner.kind === 'done') return { kind: 'failed', error: (inner.outcome as { error: unknown }).error };
+        return inner; // refused or failed, from a deeper scope
+      }
+      case 'work_outcome_ambiguous':
+        return deeperProblem ?? { kind: 'problem', scopeKey: scope.key, result };
+      case 'release_failed':
+      case 'confirmation_failed':
+        return { kind: 'problem', scopeKey: scope.key, result };
+    }
+  }
+
+  const top = await level(0);
+  switch (top.kind) {
+    case 'confirmed':
+      return {
+        status: 'confirmed',
+        value: top.value,
+        settlement: top.settlement,
+        ...(top.overrunAmount === undefined ? {} : { overrunAmount: top.overrunAmount }),
+        reservations: Object.freeze([...held]),
+      };
+    case 'refused':
+      return { status: 'refused', refusal: top.refusal, scopeKey: top.scopeKey, ...(top.reason === undefined ? {} : { reason: top.reason }) };
+    case 'failed':
+      return { status: 'released_after_failure', error: top.error };
+    case 'problem':
+      return { status: 'needs_reconciliation', scopeKey: top.scopeKey, result: top.result };
+    case 'done':
+      // Unreachable: level() never returns 'done'. Fail closed if it ever does.
+      throw new Error(`${fn}: internal error: unresolved work outcome`);
+  }
+}
+
+/** Settle value that records the same amount a confirmed scope recorded. */
+function settleOf(settlement: CapacitySettlement): CapacitySettle {
+  return settlement.usage === 'reported' ? { actualAmount: settlement.amount } : { usage: 'unknown' };
+}
+
+/** Read the paid work's outcome once. Throws (keeping every hold) on anything malformed. */
+function readScopedOutcome<T>(
+  outcome: unknown,
+): { status: 'succeeded'; value: T; settle: unknown } | { status: 'failed'; error: unknown } {
+  const parsed = readCapacityWorkOutcome<T>(outcome, true);
+  if (!parsed) {
+    throw new Error('withCapacityReservations: doTheWork returned an invalid outcome');
+  }
+  return parsed.status === 'succeeded'
+    ? { status: 'succeeded', value: parsed.value, settle: parsed.settle }
+    : { status: 'failed', error: parsed.error };
+}

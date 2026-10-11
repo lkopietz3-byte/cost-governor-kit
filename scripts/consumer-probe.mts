@@ -53,12 +53,22 @@ import {
   estimateCostMicros,
   priceFor,
   usageFromAnthropic,
+  usageFromAnthropicStream,
   usageFromOpenAI,
+  usageFromOpenAIEmbeddings,
+  type AnthropicUsageOptions,
   type DatedPricingTable,
   type PriceLookup,
   type UsageReading,
 } from 'cost-governor-kit/pricing';
-import { createCommitOnce, type CapacitySettlement, type CommitOnce } from 'cost-governor-kit/reserveConfirm';
+import {
+  createCommitOnce,
+  withCapacityReservations,
+  type CapacityReservationsResult,
+  type CapacitySettlement,
+  type CommitOnce,
+} from 'cost-governor-kit/reserveConfirm';
+import { createInMemoryCapacityLedger } from 'cost-governor-kit';
 
 const table: PricingTable = { 'toy-model': { inputPerMillion: 3, outputPerMillion: 15 } };
 const rates: ModelRates = getRatesOrThrow(table, 'toy-model');
@@ -165,6 +175,16 @@ const micros: number = lookup.status === 'found' && reading.status === 'known' ?
 const openAiUsage: UsageReading = usageFromOpenAI({});
 const unknownReason: string = openAiUsage.status === 'unknown' ? openAiUsage.reason : '';
 const attempted: Promise<unknown> = createCommitOnce(async () => 1).attempt();
+const geoOptions: AnthropicUsageOptions = { allowInferenceGeo: ['us'] };
+const streamReading: UsageReading = usageFromAnthropicStream({ input_tokens: 1, output_tokens: 1 }, undefined, geoOptions);
+const embeddingsReading: UsageReading = usageFromOpenAIEmbeddings({ prompt_tokens: 1 });
+const scoped: Promise<CapacityReservationsResult<number>> = withCapacityReservations(
+  createInMemoryCapacityLedger(),
+  { scopes: [{ key: 'u', limit: 10 }], operationId: 'o', amount: 5 },
+  async () => ({ status: 'succeeded', value: 1 }),
+);
+// @ts-expect-error a reservation request needs an amount.
+void withCapacityReservations(createInMemoryCapacityLedger(), { scopes: [{ key: 'u', limit: 10 }], operationId: 'o' }, async () => ({ status: 'succeeded', value: 1 }));
 const once: CommitOnce<number> = createCommitOnce(async () => 1);
 const commitState: 'idle' | 'pending' | 'committed' | 'failed' = once.state;
 const amountRequest: ReserveCapacityRequest = { key: 'k', limit: 10, operationId: 'o', amount: 5 };
@@ -176,6 +196,6 @@ const settledLedger: CapacityReservationLedger = {
 };
 const settleOutcome: CapacityWorkOutcome<number> = { status: 'succeeded', value: 1, settle: { actualAmount: 4 } };
 
-void [admission, micros, openAiUsage, unknownReason, attempted, commitState, amountRequest, settledLedger, settleOutcome];
+void [admission, micros, openAiUsage, unknownReason, attempted, streamReading, embeddingsReading, scoped, commitState, amountRequest, settledLedger, settleOutcome];
 void reservationSubpath;
 void [strict, advisory, allowed, multiplier, logLine, reason];

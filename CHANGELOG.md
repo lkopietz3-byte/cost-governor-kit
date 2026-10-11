@@ -67,14 +67,44 @@ All notable changes to this project are documented here. The format follows
   does not know, a hostile getter or Proxy and similar all read as unknown, which
   settles as `{ usage: 'unknown' }` and keeps the reserved estimate (never zero).
   A cache field that is absent counts as 0; one that is present and malformed is
-  unknown. `usageFromAnthropic` prices `cache_creation_input_tokens` as
-  5-minute writes when the `cache_creation` split is absent. New type `UsageReading`.
+  unknown. Fields the official SDK declares as informational or null/default
+  (`output_tokens_details`, `inference_geo` of null or `'global'`, OpenAI
+  `cache_write_tokens` of 0, `text_tokens`) do not make a reading unknown.
+  `usageFromAnthropic` prices `cache_creation_input_tokens` as 5-minute writes
+  when the `cache_creation` split is absent. New type `UsageReading`.
 - `overrunAmount` on the `confirmed` and `confirmation_failed` results of an
   amount reservation, present only when the reported actual exceeded the hold.
   The actual amount is still recorded in full.
 - `createCommitOnce(fn).attempt()`: shares the single run, never rejects and
   returns `{ ran, status: 'committed', value }` or `{ ran, status: 'failed',
   error }`. New type `CommitOnceResult`.
+- `withCapacityReservations(ledger, { scopes, operationId, amount }, doTheWork)`:
+  reserve the same amount on 1 to 8 scopes (a per-user dollar cap inside a global
+  one), run paid work once, and settle every scope. Resolves to `confirmed`
+  (with `overrunAmount` when the actual passed the hold), `refused` (naming the
+  scope; earlier holds released), `released_after_failure`, or
+  `needs_reconciliation` (naming the scope; holds kept). New types
+  `ReservationScope`, `ReserveScopesRequest`, `CapacityReservationsResult`.
+- `createInMemoryCapacityLedger({ holdMs?, now? })`: a single-process
+  `CapacityReservationLedger` for unit tests, with `usage(key)`.
+- README: a worked path for daily dollar caps per user and global (call caps,
+  `priceFor`, `estimateCostMicros`, `withCapacityReservations`, streaming with
+  `createCommitOnce`), and a Postgres capacity-ledger recipe with a `utc-day` or
+  `utc-month` window the database resolves. `src/capacityLedgerRecipePglite.test.ts`
+  runs the README's SQL, adapter and both route examples; the opt-in
+  `src/capacityLedgerPostgres.test.ts` (`npm run test:postgres`) fires 50
+  concurrent connections at a real Postgres.
+- `usageFromAnthropicStream(start, delta)`: merges a stream's `message_start`
+  and final `message_delta` usage; unknown when no `message_delta` arrived.
+  `usageFromOpenAIEmbeddings(usage)`: an input-only reading for embeddings.
+  `usageFromAnthropic(usage, { allowInferenceGeo })` option and the type
+  `AnthropicUsageOptions`.
+- `checkPreCallCeiling({ ..., requireOutputTokens: true })` throws when
+  `outputTokens` is missing instead of pricing it at $0. Off by default.
+- README opening rewritten around the one job (fail-closed admission and spend
+  caps on a database you already run), with a start-here map and a list of what
+  the kit cannot see (keys built from unset ids, month windows, tiers, weights,
+  store clocks).
 - README: dated price tables, `estimateCostMicros` and the usage readers, with
   illustrative, dated example prices.
 

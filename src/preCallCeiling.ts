@@ -58,6 +58,14 @@ export interface PreCallCeilingCheck {
    * them with `formatRatesForLog` so a stale number is visible.
    */
   rates: ModelRates;
+  /**
+   * When `true`, `estimatedNextCallUsage.outputTokens` must be present, or the
+   * check throws a `TypeError` instead of pricing the missing output at $0.
+   * Off by default, so existing callers behave as before; turn it on for any
+   * call whose output can be long. Set `outputTokens` to the request's
+   * `max_tokens` bound.
+   */
+  requireOutputTokens?: boolean;
 }
 
 /** Output of {@link checkPreCallCeiling}. */
@@ -125,6 +133,7 @@ export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingR
   const ceilingUsd: unknown = check.ceilingUsd;
   const spentSoFarUsd: unknown = check.spentSoFarUsd;
   const estimatedNextCallUsage: unknown = check.estimatedNextCallUsage;
+  const requireOutputTokens: unknown = check.requireOutputTokens;
 
   if (!isPlainRecord(rates)) {
     throw new TypeError(RATES_REQUIRED_MESSAGE);
@@ -156,11 +165,28 @@ export function checkPreCallCeiling(check: PreCallCeilingCheck): PreCallCeilingR
     throw new RangeError(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${spentSoFarUsd}`);
   }
 
+  if (requireOutputTokens !== undefined && typeof requireOutputTokens !== 'boolean') {
+    throw new TypeError('checkPreCallCeiling: requireOutputTokens must be a boolean when present');
+  }
+  let usageToPrice = estimatedNextCallUsage;
+  if (requireOutputTokens === true && isPlainRecord(estimatedNextCallUsage)) {
+    // Copy the usage once, so the presence check and the pricing see the same values.
+    const copy: Record<string | symbol, unknown> = Object.create(null) as Record<string | symbol, unknown>; // null prototype: an own `__proto__` key stays a key
+    for (const key of Reflect.ownKeys(estimatedNextCallUsage)) copy[key] = estimatedNextCallUsage[key as string];
+    if (copy.outputTokens === undefined) {
+      throw new TypeError(
+        'checkPreCallCeiling: estimatedNextCallUsage.outputTokens is required (set it to the request\'s max_tokens bound); ' +
+          'a missing output count would be priced at $0',
+      );
+    }
+    usageToPrice = copy;
+  }
+
   // estimateCostUsd validates the optional cacheReadPerMillion and the usage
   // estimate, from this copy of the rates (never the caller's object again).
   const projectedNextCallCostUsd = estimateCostUsd(
     { inputPerMillion, outputPerMillion, cacheReadPerMillion } as ModelRates,
-    estimatedNextCallUsage as UsageTokens,
+    usageToPrice as UsageTokens,
   );
   const unroundedProjectedTotalUsd = spentSoFarUsd + projectedNextCallCostUsd;
   if (!Number.isFinite(unroundedProjectedTotalUsd)) {

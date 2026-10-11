@@ -92,6 +92,26 @@
   unknown, which settles as `{ usage: 'unknown' }` and keeps the reserved
   estimate, never zero. A cache field that is absent counts as 0; one that is
   present and malformed is unknown.
+- Usage readers accept what the official SDK types declare as informational or
+  null/default and refuse what could change the bill: `output_tokens_details`
+  (inside the billed `output_tokens`), `inference_geo` of null or `'global'`,
+  `speed` of `'standard'`, null `iterations`/`fallback_credit`, OpenAI
+  `cache_write_tokens` of 0 and `text_tokens` are known; another `inference_geo`
+  (unless the caller lists it), `speed: 'fast'`, populated `iterations`, nonzero
+  cache-write, audio or image tokens, and any field not declared are unknown.
+  Ambiguous stays unknown. A stream is final only with a `message_delta`
+  (`usageFromAnthropicStream`); without one it is unknown. Embeddings have their
+  own reader, because a chat usage that lacks its output count must stay unknown.
+- `withCapacityReservations` is `withCapacityReservation` nested once per scope.
+  Input is validated before the ledger is called (1 to 8 scopes, distinct keys,
+  amount a safe integer >= 1); work runs at most once and only after every scope
+  gave a hold; anything unresolved keeps every hold and returns
+  `needs_reconciliation` naming the scope; a refusal or reported failure releases
+  every earlier hold. It is not atomic across scopes and errs toward refusing.
+  `createInMemoryCapacityLedger` is a single-process test double.
+- `checkPreCallCeiling`'s `requireOutputTokens` is additive and off by default;
+  when true a missing `outputTokens` throws a TypeError (the usage is copied once
+  first).
 - `assertPricingFresh(table, { now, maxAgeDays })` is the only signature; `now`
   always comes from the caller, and any other options key is rejected.
 

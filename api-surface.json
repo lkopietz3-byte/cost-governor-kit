@@ -10,6 +10,7 @@
     "checkPreCallCeiling",
     "createCommitOnce",
     "createInMemoryAdmissionStore",
+    "createInMemoryCapacityLedger",
     "definePricingTable",
     "estimateCostMicros",
     "estimateCostUsd",
@@ -17,8 +18,11 @@
     "getRatesOrThrow",
     "priceFor",
     "usageFromAnthropic",
+    "usageFromAnthropicStream",
     "usageFromOpenAI",
+    "usageFromOpenAIEmbeddings",
     "withCapacityReservation",
+    "withCapacityReservations",
     "withReserveConfirm"
   ],
   "cost-governor-kit/pricing": [
@@ -33,7 +37,9 @@
     "getRatesOrThrow",
     "priceFor",
     "usageFromAnthropic",
-    "usageFromOpenAI"
+    "usageFromAnthropicStream",
+    "usageFromOpenAI",
+    "usageFromOpenAIEmbeddings"
   ],
   "cost-governor-kit/preCallCeiling": [
     "checkPreCallCeiling"
@@ -41,6 +47,7 @@
   "cost-governor-kit/reserveConfirm": [
     "createCommitOnce",
     "withCapacityReservation",
+    "withCapacityReservations",
     "withReserveConfirm"
   ],
   "cost-governor-kit/admission": [

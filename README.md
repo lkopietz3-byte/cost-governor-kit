@@ -2,40 +2,55 @@
 
 **[Try it in your browser →](https://lkopietz3-byte.github.io/honesty-kits/#cost-governor-kit)** · Part of [honesty kits](https://github.com/lkopietz3-byte/honesty-kits), a family of small checks for the claims an AI product makes.
 
-A small, zero-dependency TypeScript library for four cost-safety jobs in apps
-that call paid AI APIs:
+**Fail-closed admission and spend caps for AI endpoints, on a database you
+already run.** A small, zero-dependency TypeScript library for apps that call a
+paid AI API directly from their own code.
 
-1. **Pricing math** (`estimateCostUsd`, `estimateCostMicros`): token counts plus
-   prices you supply in, dollars or exact integer micro-dollars out, with cache
-   reads, 5-minute cache writes and 1-hour cache writes priced as separate line
-   items, from a dated table that rejects unknown models.
-2. **A pre-call dollar ceiling** (`checkPreCallCeiling`): decide *before* a call
-   whether spend so far plus the next call's estimated cost stays within a hard
-   cap. Rates are always passed in; the library has no price table.
-3. **Usage counting around a paid call** (`withReserveConfirm`,
-   `withCapacityReservation`): an advisory check-then-commit helper that never
-   counts a call that throws, and a reserve/confirm/release orchestrator for a
-   strict limit that is enforced by a storage adapter you write.
-4. **Admission control** (`admitBeforeCall`): count one attempt against several
-   caps at once (global, per user, per route) before the paid call, all or
-   nothing, failing closed and never refunding. The atomic increment lives in a
-   store you write; the README has Postgres, D1 and Redis recipes. See
-   [Admission control](#admission-control-the-pattern-most-apps-need).
+The one job it does well: before every paid call, count the attempt against
+several caps at once (all users today, this user today, this route this hour),
+all or nothing, and refuse the call when the count cannot be confirmed. If the
+database is down, slow or answers something odd, the call does not happen, and a
+counted attempt is never refunded. Call caps come first; dollar caps use the same
+database and are the second job (see [Start here](#start-here)).
 
-The patterns come from fixes in the author's own apps; the doc comment at the
-top of each `src/*.ts` file names the incident.
+It is for solo developers and small teams shipping a logged-in or public AI
+endpoint who today count rows and then insert, or use a limiter that quietly does
+nothing when its store is not configured.
 
-**Don't use it for:**
+**What it does not do:**
 
-- Abuse or DDoS rate limiting. This is about your own spend and your users'
+- It is not a gateway, a proxy or a hosted service, and it does not sit between
+  you and the provider. The atomic increment lives in a store you write against
+  your own database; the README has Postgres, D1 and Redis recipes, and the
+  in-memory stores here are for unit tests only. If you already route traffic
+  through a gateway, or use the budget features of your platform or provider,
+  use those; this is for code that calls the provider itself.
+- It ships no prices and does not know what a call really cost. You supply a
+  dated price table and the usage the provider reports; unknown usage is never
+  counted as zero.
+- It does not stop abuse or DDoS. It protects your own spend and your users'
   quotas, not hostile traffic.
-- A price source. It ships no prices; you must supply current ones.
-- A strict concurrent limit out of the box. `withCapacityReservation` and
-  `admitBeforeCall` are only as strict as the adapter or store you implement.
-  This kit ships no production store; its in-memory admission store is for
-  unit tests and does not hold across instances.
-- Exact billing reconciliation. Estimates are rounded to the micro-dollar and
-  some model-specific cache rates are not modeled (see [Honest limits](#honest-limits)).
+- It is not exact billing reconciliation. A dollar cap is only as accurate as
+  your estimate of the call before it runs.
+- A cap is only as strict as the store behind it. Prove yours with a
+  multi-connection test; the README says how.
+
+## Start here
+
+| You want to | Read |
+| --- | --- |
+| Cap calls per user, per route and globally, fail closed | [Admission control](#admission-control-the-pattern-most-apps-need) |
+| Cap dollars per user and globally, streaming included | [Daily dollar caps per user and global](#daily-dollar-caps-per-user-and-global) |
+| Price a call from a dated table, exact to the micro-dollar | [Dated price tables](#dated-price-tables-definepricingtable-assertpricingfresh-pricefor) and [`estimateCostMicros`](#estimatecostmicrosusage-price-number) |
+| Read a provider's usage, or admit you cannot | [Provider usage](#provider-usage-usagefromanthropicusage-usagefromopenaiusage) |
+| Refuse one call that would pass a spend ceiling | [Pre-call ceiling](#2-pre-call-ceiling-cost-governor-kitprecallceiling) |
+
+Quick map of the pieces: `admitBeforeCall` (call caps), `withCapacityReservations`
+(dollar caps over several scopes), `withCapacityReservation` (one scope),
+`definePricingTable` / `priceFor` / `estimateCostMicros` (prices),
+`usageFromAnthropic` / `usageFromOpenAI` (usage), `createCommitOnce` (once-only
+commits for streams), `checkPreCallCeiling` (a spend ceiling), and in-memory
+test doubles for the admission store and the capacity ledger.
 
 ## Install
 
@@ -240,6 +255,42 @@ including "a limit only goes down within a window" and "a window never moves
 backwards when the clock steps back". But its counts live in one process's
 memory: **it does not hold a cap across serverless instances, processes or
 restarts.** Inject `now` to test window rollover.
+
+**What the kit cannot see (decide these in your app).** The store counts what
+you give it; these choices are yours, and each has bitten a real app:
+
+- **Build the key from a checked id.** `` `chat:user:${userId}` `` with an unset
+  `userId` is the key `chat:user:undefined`, and every anonymous caller shares
+  one bucket. Reject a missing id before you build the key. The kit only checks
+  that a key is not blank.
+- **A window is a UTC day or hour, nothing else.** A month in the key
+  (`chat:user:u:2026-10`) does not make a monthly cap: it still resets every UTC
+  day, so a "5 a month" cap admits 5 a day. There is no month window in the
+  admission store; the capacity ledger below has `utc-month`. Likewise a
+  UTC-day cap of N can admit up to 2N within minutes across midnight, and an hour
+  cap and a day cap are two separate calls (so the slot taken by the first stays
+  spent if the second is limited).
+- **Different limits per tier.** Within a window a limit only goes down, so a
+  user upgraded from limit 5 to limit 100 on the same key keeps the lower limit
+  until the next window. Put the tier in the key (`chat:user:u:pro`), or raise
+  the stored limit by hand during an incident (for the Postgres recipe,
+  `update public.admission_usage set lim = ...`). Tier-in-key means a user who
+  changes tier mid-window gets both allowances that day.
+- **Weights.** Every admission counts 1. A heavy route and a light one need
+  separate scopes (`chat:route:title`, `chat:route:long`), or use the dollar caps
+  below, where the hold is the weight.
+- **One admission pays for one provider attempt.** A tool loop, a title call or
+  an SDK retry is more attempts: admit once per paid call, or use one dollar hold
+  sized for all of them.
+- **A wrong store clock is not detected.** The window id in a reply is checked
+  for shape and kind (day or hour), not against your clock. A store whose clock
+  is days off will say `admitted` with a valid-looking old `windowId`. Monitor the
+  database clock; this kit does not.
+- **Bad configuration reads as a 503.** A limit read from an unparsed environment
+  variable (`'20'` is a string) is `unavailable` / `invalid_request`, and
+  `admissionHttpStatus` maps it to a bare 503 for every request. The `cause` on
+  the outcome says why; log it, and run one admission with your real
+  configuration at startup.
 
 ### Store recipes (yours to own and test)
 
@@ -540,6 +591,421 @@ was **not run** while writing this recipe.
 
 ---
 
+## Daily dollar caps per user and global
+
+Call caps (above) stop a flood; they do not stop one expensive call. To cap
+**dollars**, reserve the worst-case cost of each call before it runs, then
+settle to the real cost afterward. The pieces already in this kit do it:
+
+1. `admitBeforeCall` counts the attempt first, cheaply. Keep it: it is the
+   fail-closed gate against floods and it is never refunded.
+2. `priceFor` finds the model's price in your dated table. An unknown model is
+   refused; there is no free fallback.
+3. `estimateCostMicros` turns the estimated input plus the `max_tokens` bound
+   into whole micro-dollars. That is the **hold**.
+4. `withCapacityReservations` takes the hold on every scope (the user's daily
+   dollars and the global daily dollars), runs the paid call once, and settles
+   each scope to the real cost, or to the full estimate when usage is unknown.
+5. The ledger behind it is yours. A Postgres recipe is below, and
+   `createInMemoryCapacityLedger` is the test double.
+
+What you get: a scope's confirmed dollars plus its unexpired holds never exceed
+its limit; a refusal names the scope; a call whose outcome is unknown keeps its
+hold until you reconcile; a missing usage block counts the whole estimate, never
+zero; a real cost above the estimate is recorded in full and reported as
+`overrunAmount`.
+
+What you do not get: holds are taken one scope at a time, so a refusal on the
+global scope briefly held the user's capacity before releasing it (that errs
+toward refusing, never toward overspending). Accuracy is only as good as the
+estimate: an estimate that runs low lets concurrent calls overshoot the cap by
+the difference, and one that runs high leaves cap unused. Estimate the input
+with your provider's token counter (or a deliberately high guess) and use the
+`max_tokens` bound for the output. A call that fires several provider requests
+(tool loops, a title call) needs a hold for each, or one hold sized for all.
+
+### The ledger: Postgres recipe
+
+One function takes a per-scope advisory lock, reads the clock, sums confirmed
+usage plus unexpired holds for the current window, and inserts the hold only if
+it fits. The window (`utc-day`, or `utc-month`) is resolved by the database
+after the lock, never by the app. Repeating `(key, operationId)` never creates a
+second hold. It is documentation, not code this package runs against your
+database: you own it, review it and test it.
+
+<!-- capacity-postgres-recipe:start -->
+```sql
+-- Capacity ledger for strict caps counted in any integer unit (here:
+-- micro-dollars). The database owns the clock and the window; no app timestamps.
+-- Run as the role that should OWN the table and the functions (on Supabase,
+-- the migration role `postgres`). The server role only executes the functions.
+create table public.capacity_holds (
+  id           bigint generated always as identity,
+  scope_key    text not null,
+  operation_id text not null,
+  win          text not null,                           -- window id, resolved by the database when the hold was taken
+  amount       bigint not null check (amount >= 1),     -- the size of the hold
+  state        text not null default 'held' check (state in ('held', 'confirmed', 'released')),
+  recorded     bigint not null default 0 check (recorded >= 0), -- what was confirmed; may exceed amount
+  expires_at   timestamptz not null,
+  primary key (scope_key, operation_id)                 -- one hold per logical operation, across windows
+);
+create index capacity_holds_usage on public.capacity_holds (scope_key, win);
+alter table public.capacity_holds enable row level security;
+revoke all on table public.capacity_holds from public;
+
+create function public.capacity_reserve(
+  p_key text, p_limit bigint, p_operation_id text, p_amount bigint, p_hold_seconds integer, p_window text
+)
+returns table (status text, hold_id bigint, expires_at timestamptz)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+#variable_conflict use_column
+declare
+  v_win text;
+  v_used bigint;
+  v_row public.capacity_holds%rowtype;
+begin
+  if p_key is null or btrim(p_key) = '' or p_operation_id is null or btrim(p_operation_id) = ''
+     or p_limit is null or p_limit < 0 or p_amount is null or p_amount < 1
+     or p_hold_seconds is null or p_hold_seconds < 1 or p_hold_seconds > 86400
+     or p_window is null or p_window not in ('utc-day', 'utc-month') then
+    raise exception 'invalid capacity request' using errcode = '22023';
+  end if;
+
+  -- One scope at a time. Take the lock, THEN read the clock, so a request that
+  -- waited past midnight counts in the new window. clock_timestamp(), not now().
+  perform pg_advisory_xact_lock(hashtextextended('capacity:' || p_key, 0));
+
+  select * into v_row from public.capacity_holds h
+    where h.scope_key = p_key and h.operation_id = p_operation_id;
+  if found then
+    -- The same operation again: never a second hold.
+    return query select case when v_row.state = 'held' then 'operation_in_progress' else 'operation_terminal' end,
+                        v_row.id, v_row.expires_at;
+    return;
+  end if;
+
+  v_win := to_char(clock_timestamp() at time zone 'utc', case p_window when 'utc-day' then 'YYYY-MM-DD' else 'YYYY-MM' end);
+  select coalesce(sum(case h.state when 'confirmed' then h.recorded else h.amount end), 0) into v_used
+    from public.capacity_holds h
+    where h.scope_key = p_key and h.win = v_win
+      and (h.state = 'confirmed' or (h.state = 'held' and h.expires_at > clock_timestamp()));
+
+  if v_used + p_amount > p_limit then
+    return query select 'denied', null::bigint, null::timestamptz;
+    return;
+  end if;
+
+  insert into public.capacity_holds (scope_key, operation_id, win, amount, expires_at)
+    values (p_key, p_operation_id, v_win, p_amount, clock_timestamp() + make_interval(secs => p_hold_seconds))
+    returning * into v_row;
+  return query select 'acquired', v_row.id, v_row.expires_at;
+end;
+$$;
+
+-- Turn a hold into confirmed usage. Idempotent. p_recorded is what to count
+-- (it may be more than the hold; it is never capped); null counts the hold.
+create function public.capacity_confirm(p_key text, p_operation_id text, p_hold_id bigint, p_recorded bigint)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_row public.capacity_holds%rowtype;
+begin
+  if p_key is null or p_operation_id is null or p_hold_id is null or (p_recorded is not null and p_recorded < 0) then
+    raise exception 'invalid capacity request' using errcode = '22023';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('capacity:' || p_key, 0));
+  select * into v_row from public.capacity_holds h
+    where h.scope_key = p_key and h.operation_id = p_operation_id and h.id = p_hold_id;
+  if not found then raise exception 'unknown hold' using errcode = 'P0002'; end if;
+  if v_row.state = 'confirmed' then return; end if;
+  if v_row.state = 'released' then raise exception 'hold was released' using errcode = 'P0001'; end if;
+  update public.capacity_holds as h set state = 'confirmed', recorded = coalesce(p_recorded, h.amount)
+    where h.scope_key = p_key and h.operation_id = p_operation_id;
+end;
+$$;
+
+-- Drop a hold without counting it. Idempotent.
+create function public.capacity_release(p_key text, p_operation_id text, p_hold_id bigint)
+returns void
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_row public.capacity_holds%rowtype;
+begin
+  if p_key is null or p_operation_id is null or p_hold_id is null then
+    raise exception 'invalid capacity request' using errcode = '22023';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('capacity:' || p_key, 0));
+  select * into v_row from public.capacity_holds h
+    where h.scope_key = p_key and h.operation_id = p_operation_id and h.id = p_hold_id;
+  if not found then raise exception 'unknown hold' using errcode = 'P0002'; end if;
+  if v_row.state = 'released' then return; end if;
+  if v_row.state = 'confirmed' then raise exception 'hold was confirmed' using errcode = 'P0001'; end if;
+  update public.capacity_holds as h set state = 'released'
+    where h.scope_key = p_key and h.operation_id = p_operation_id;
+end;
+$$;
+
+-- Functions are executable by PUBLIC unless you revoke it. Close that, and
+-- also Supabase's default grants to anon and authenticated (which
+-- `revoke ... from public` does not remove).
+revoke all on function public.capacity_reserve(text, bigint, text, bigint, integer, text) from public;
+revoke all on function public.capacity_confirm(text, text, bigint, bigint) from public;
+revoke all on function public.capacity_release(text, text, bigint) from public;
+do $$
+begin
+  if exists (select from pg_roles where rolname = 'anon') then
+    revoke all on table public.capacity_holds from anon;
+    revoke all on function public.capacity_reserve(text, bigint, text, bigint, integer, text) from anon;
+    revoke all on function public.capacity_confirm(text, text, bigint, bigint) from anon;
+    revoke all on function public.capacity_release(text, text, bigint) from anon;
+  end if;
+  if exists (select from pg_roles where rolname = 'authenticated') then
+    revoke all on table public.capacity_holds from authenticated;
+    revoke all on function public.capacity_reserve(text, bigint, text, bigint, integer, text) from authenticated;
+    revoke all on function public.capacity_confirm(text, text, bigint, bigint) from authenticated;
+    revoke all on function public.capacity_release(text, text, bigint) from authenticated;
+  end if;
+end;
+$$;
+-- Then grant EXECUTE to the one role your server uses, and nothing else.
+-- On Supabase that is service_role (a missing grant is a ledger error, so every
+-- call is refused: closed, but an outage):
+-- grant execute on function public.capacity_reserve(text, bigint, text, bigint, integer, text) to service_role;
+-- grant execute on function public.capacity_confirm(text, text, bigint, bigint) to service_role;
+-- grant execute on function public.capacity_release(text, text, bigint) to service_role;
+```
+<!-- capacity-postgres-recipe:end -->
+
+```ts
+import type { CapacityReservation, CapacityReservationLedger } from 'cost-governor-kit/reserveConfirm';
+
+// Any Postgres driver: node-postgres, postgres.js (wrap it), Drizzle's
+// db.execute, Neon, or PGlite. It must return the rows of one statement.
+type Query = (sql: string, params: unknown[]) => Promise<{ rows: Array<Record<string, unknown>> }>;
+
+export function postgresCapacityLedger(
+  query: Query,
+  options: { window?: 'utc-day' | 'utc-month'; holdSeconds?: number } = {},
+): CapacityReservationLedger {
+  const window = options.window ?? 'utc-day';
+  const holdSeconds = options.holdSeconds ?? 900; // longer than your longest call or stream
+  return {
+    async reserveCapacity({ key, limit, operationId, amount }) {
+      const { rows } = await query('select * from public.capacity_reserve($1, $2, $3, $4, $5, $6)', [
+        key, limit, operationId, amount ?? 1, holdSeconds, window,
+      ]);
+      const row = rows.length === 1 ? rows[0] : undefined;
+      if (!row) throw new Error('capacity_reserve returned no row'); // throw when the outcome is unknown
+      if (row.status === 'denied') return { status: 'denied', reason: 'limit' };
+      const reservation: CapacityReservation = {
+        id: String(row.hold_id),
+        key,
+        operationId,
+        expiresAt: new Date(row.expires_at as string | Date).toISOString(), // an ISO string with a zone
+      };
+      if (row.status === 'acquired') return { status: 'acquired', reservation };
+      if (row.status === 'operation_in_progress') return { status: 'operation_in_progress', reservation };
+      if (row.status === 'operation_terminal') return { status: 'operation_terminal', operationId };
+      throw new Error(`unexpected capacity_reserve status ${String(row.status)}`);
+    },
+    async confirmReservation(reservation, settlement) {
+      // settlement.amount is what to record; it can be more than the hold.
+      await query('select public.capacity_confirm($1, $2, $3, $4)', [
+        reservation.key, reservation.operationId, reservation.id, settlement?.amount ?? null,
+      ]);
+    },
+    async releaseReservation(reservation) {
+      await query('select public.capacity_release($1, $2, $3)', [reservation.key, reservation.operationId, reservation.id]);
+    },
+  };
+}
+```
+
+Notes on the recipe:
+
+- The `scope_key` has no date in it (`spend:user:42`, not `spend:user:42:2026-10-10`):
+  the database appends the window. A monthly cap is `window: 'utc-month'`.
+- Raise or lower a cap by passing a different `limit` on the next call; the
+  limit is not stored. A tier upgrade therefore takes effect on the next
+  request, unlike the call-count store, where a limit only goes down within a
+  window.
+- A hold is released after a call that **definitely** was not charged, and is
+  kept (and expires after `holdSeconds`) when the outcome is unknown. Expired
+  holds stop counting, so paid work that was never confirmed can push real usage
+  past the cap until you reconcile it. Size `holdSeconds` above your longest
+  call or stream.
+- `src/capacityLedgerRecipePglite.test.ts` applies this exact SQL and TypeScript,
+  read from this README, to PGlite (one connection: logic, not concurrency) and
+  runs them inside `withCapacityReservations`: limits, idempotency, expiry,
+  windows, input rejection, and that a role with only `EXECUTE` cannot touch the
+  table. `src/capacityLedgerPostgres.test.ts` fires 50 truly concurrent
+  connections at a real Postgres; it is skipped unless `COST_GOVERNOR_PG_URL` is
+  set (`npm run test:postgres`). A run on 2026-10-10 against a local
+  Postgres 17.11 (50 separate connections, three rounds each): exactly 10 holds
+  of 10 at a limit of 100 from 50 racing reserves; exactly 5 of 50 confirmed
+  under a user cap of 50 inside a global cap; exactly 12 of 50 confirmed with 50
+  different users inside a global cap of 120, with no hold left on any refused
+  user's scope; and one hold from 50 requests racing with the same operation id.
+  It says nothing about PgBouncer, Supabase's role setup or failover.
+
+### A route: non-streaming
+
+```js
+async function handle({ userId, requestId, model, prompt, maxTokens, estimatedInputTokens }) {
+  // 1. Count the attempt against the call caps. Never refunded.
+  const admission = await admitBeforeCall(store, {
+    scopes: [{ key: 'chat:global', limit: 5_000 }, { key: `chat:user:${userId}`, limit: 200 }],
+  });
+  const refused = admissionHttpStatus(admission, { perUserScopePrefixes: ['chat:user:'] });
+  if (refused !== null) return new Response('Please try again later.', { status: refused });
+
+  // 2. An unknown model is refused, not priced at zero.
+  const found = priceFor(table, `anthropic:${model}`);
+  if (found.status === 'unknown-model') return new Response('Unsupported model.', { status: 400 });
+
+  // 3. Hold the worst case: estimated input plus the max_tokens bound.
+  const hold = Math.max(1, estimateCostMicros({ inputTokens: estimatedInputTokens, outputTokens: maxTokens }, found.price));
+
+  const result = await withCapacityReservations(
+    ledger,
+    {
+      scopes: [
+        { key: `spend:user:${userId}`, limit: 2_000_000 }, // $2.00 a day
+        { key: 'spend:global', limit: 100_000_000 }, // $100.00 a day
+      ],
+      operationId: requestId, // the same id on every retry of this request
+      amount: hold,
+    },
+    async () => {
+      const response = await client.messages.create({ model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }] });
+      const reading = usageFromAnthropic(response.usage);
+      return {
+        status: 'succeeded',
+        value: response,
+        // Unknown usage is not zero: it settles at the full hold.
+        settle: reading.status === 'known' ? { actualAmount: estimateCostMicros(reading.usage, found.price) } : { usage: 'unknown' },
+      };
+    },
+  );
+
+  if (result.status === 'confirmed') return Response.json(result.value);
+  if (result.status === 'refused') {
+    // The user's own cap is theirs to hit; a shared cap or an unavailable ledger is ours.
+    return new Response('Please try again later.', { status: result.scopeKey.startsWith('spend:user:') ? 429 : 503 });
+  }
+  log(result); // released_after_failure, or needs_reconciliation: holds may remain
+  return new Response('Please try again later.', { status: 503 });
+}
+```
+
+If the provider call throws, `withCapacityReservations` keeps the holds
+(`needs_reconciliation`) because the call may have been billed. When you know it
+was not (for example a 4xx the provider returns before processing), catch it in
+the work function and `return { status: 'failed', error }` to release the holds.
+Make the call once, with the SDK's automatic retries off.
+
+### A route: streaming
+
+The response must go back while the stream is still running, but the settlement
+happens after it ends. Start the reservation, hand the `Response` out as soon as
+the stream exists, and let the work function wait for the stream to finish. A
+stream can end three ways at once (finished, errored, the client left), so
+`createCommitOnce` makes "the stream is over" happen exactly once.
+
+```js
+async function handleStream({ userId, requestId, model, prompt, maxTokens, estimatedInputTokens }) {
+  // Steps 1 to 3 are the same as the non-streaming route.
+  const admission = await admitBeforeCall(store, {
+    scopes: [{ key: 'chat:global', limit: 5_000 }, { key: `chat:user:${userId}`, limit: 200 }],
+  });
+  const refused = admissionHttpStatus(admission, { perUserScopePrefixes: ['chat:user:'] });
+  if (refused !== null) return new Response('Please try again later.', { status: refused });
+  const found = priceFor(table, `anthropic:${model}`);
+  if (found.status === 'unknown-model') return new Response('Unsupported model.', { status: 400 });
+  const hold = Math.max(1, estimateCostMicros({ inputTokens: estimatedInputTokens, outputTokens: maxTokens }, found.price));
+
+  let respond;
+  const responded = new Promise((resolve) => (respond = resolve));
+  const done = withCapacityReservations(
+    ledger,
+    {
+      scopes: [{ key: `spend:user:${userId}`, limit: 2_000_000 }, { key: 'spend:global', limit: 100_000_000 }],
+      operationId: requestId,
+      amount: hold,
+    },
+    async () => {
+      const upstream = await client.messages.create({ model, max_tokens: maxTokens, messages: [{ role: 'user', content: prompt }], stream: true });
+      let start;
+      let delta;
+      let over;
+      const finished = new Promise((resolve) => (over = resolve));
+      const streamOver = createCommitOnce(async () => over());
+      const encoder = new TextEncoder();
+      const body = new ReadableStream({
+        async start(controller) {
+          try {
+            for await (const event of upstream) {
+              if (event.type === 'message_start') start = event.message.usage;
+              if (event.type === 'message_delta') delta = event.usage;
+              if (event.type === 'content_block_delta' && event.delta.text) controller.enqueue(encoder.encode(event.delta.text));
+            }
+            controller.close();
+          } catch (error) {
+            controller.error(error);
+          } finally {
+            await streamOver();
+          }
+        },
+        cancel() {
+          // The client left. Also abort the upstream request here, so it stops billing.
+          return streamOver();
+        },
+      });
+      respond(new Response(body));
+      await finished;
+      // A stream that never reached message_delta (a cancel, a dropped connection) is unknown:
+      // it settles at the full hold, because the provider may have billed it.
+      const reading = usageFromAnthropicStream(start, delta);
+      return {
+        status: 'succeeded',
+        value: undefined,
+        settle: reading.status === 'known' ? { actualAmount: estimateCostMicros(reading.usage, found.price) } : { usage: 'unknown' },
+      };
+    },
+  );
+
+  // Whichever comes first: the stream's Response, or a refusal before any stream.
+  const first = await Promise.race([
+    responded,
+    done.then((result) => new Response('Please try again later.', { status: result.status === 'refused' && result.scopeKey.startsWith('spend:user:') ? 429 : 503 })),
+  ]);
+  void done.then((result) => result.status === 'confirmed' || log(result));
+  return first;
+}
+```
+
+Aborted and failed streams are the expensive edge. A stream that ends without
+`message_delta` settles at the full hold (unknown), so a user who cancels every
+request still pays the estimate each time. If the stream failed before the
+provider produced anything, return `{ status: 'failed', error }` from the work
+function to release the holds instead. For OpenAI, read the final chunk's usage
+with `usageFromOpenAI` the same way. The Vercel AI SDK's normalized usage
+(`inputTokens: { noCache, cacheRead, cacheWrite }`) is a different shape: map it
+to the kit's counts yourself and pass the result to `estimateCostMicros`, or
+read the provider's raw `usage` from the response.
+
+**Never settle a missing cost as zero.** A missing or `NaN` cost is `{ usage: 'unknown' }`, not `actualAmount: 0`: some real runs do report a cost of exactly 0, and a missing one that is mapped to 0 undercounts silently.
+
 ## 1. Pricing (`cost-governor-kit/pricing`)
 
 ### `estimateCostUsd(rates, usage): number`
@@ -673,7 +1139,12 @@ const micros = estimateCostMicros({ inputTokens: 2_000, outputTokens: 500 }, fou
 ```
 
 - Keys are `provider:model` with a lowercase provider; the model part may contain
-  `:` (some Bedrock ids do) but no whitespace or control characters. An entry
+  `:` (some Bedrock ids do) but no whitespace or control characters. A lookup is
+  an exact match: a dated id (`...-20251001`), a gateway-style `vendor/model` id
+  or different capitalization is `unknown-model`. That is safe and sometimes
+  annoying: list the ids you actually send, or normalize the id in one small
+  function of your own before `priceFor`. Never normalize a client-supplied model
+  name by passing it through unchanged. An entry
   needs `inputPerMTokMicros` and `outputPerMTokMicros`; any other key (a typo such
   as `cacheWritePerMillion`) throws.
 - **Safe integers only.** A price is a non-negative safe integer (at most
@@ -757,8 +1228,36 @@ estimate. `reason` is a short escaped sentence for logs.
 - If `estimateCostMicros` throws because your price lacks a bucket, fix the
   table; treat that as a deploy-time error, not as a reason to record zero.
 
-The test fixtures were written by hand from the providers' documented shapes,
-not captured from live responses.
+- **Informational fields are accepted.** `service_tier`, `output_tokens_details`
+  (a breakdown inside `output_tokens`, which stays the billed total),
+  `inference_geo` of `null` or `'global'`, and the beta `speed`, `iterations` and
+  `fallback_credit` fields when they are null or default do not make a reading
+  unknown. An `inference_geo` of another region is unknown unless you pass
+  `usageFromAnthropic(usage, { allowInferenceGeo: ['us'] })` because your table
+  already prices it; a populated beta field (`speed: 'fast'`, `iterations`,
+  `fallback_credit`) stays unknown. For OpenAI, `cache_write_tokens` of 0 and the
+  `text_tokens` breakdowns are accepted; nonzero cache-write, audio or image
+  tokens are unknown (not priced here).
+- **A stream is final only after `message_delta`.** The usage on
+  `message_start` carries a placeholder `output_tokens`; read as a finished call
+  it would record almost nothing. Use
+  `usageFromAnthropicStream(startUsage, deltaUsage)`: it merges the start (input
+  side, cache split) with the final `message_delta` (cumulative totals; the
+  delta's non-null values win), and returns unknown when no `message_delta`
+  arrived, so an aborted stream settles at the full estimate. A bare
+  `message_delta` usage (no `input_tokens`) is unknown on its own.
+- **Embeddings** return `{ prompt_tokens, total_tokens }` and no output count,
+  which `usageFromOpenAI` rightly calls unknown for a chat call. For an
+  embeddings call use `usageFromOpenAIEmbeddings(usage)`, an input-only reading.
+- **Other shapes are yours to map.** The Vercel AI SDK's normalized usage
+  (`inputTokens: { noCache, cacheRead, cacheWrite }`) and a provider's extra
+  top-level fields (for example a top-level `cached_tokens`) make a reading
+  unknown. Map them to the kit's counts yourself, or read the raw provider
+  `usage`.
+
+The test fixtures were written by hand from the providers' documented shapes
+(and checked against the field names in the official TypeScript SDK types), not
+captured from live responses.
 
 ### `getRatesOrThrow(table, model): ModelRates`
 
@@ -798,7 +1297,10 @@ the total to the micro-dollar, and returns:
 > **Pass `outputTokens`.** `estimatedNextCallUsage` must include `outputTokens`,
 > set to the call's `max_tokens` bound. If you omit it, output is priced at $0
 > and the ceiling check under-counts the call. Sub-half-micro calls also price at
-> $0; see the warnings under `estimateCostUsd`.
+> $0; see the warnings under `estimateCostUsd`. Pass
+> `requireOutputTokens: true` and the check throws a `TypeError` when
+> `outputTokens` is missing, instead of allowing the call. It is off by default
+> so existing callers behave as before.
 
 It is pure: no I/O, no clock, no stored state, and it does not mutate its input.
 It throws when the argument, `rates` or the usage estimate is not a plain object
@@ -1023,6 +1525,57 @@ if (result.status === 'confirmed' && result.overrunAmount) {
 }
 ```
 
+### Several scopes at once: `withCapacityReservations(ledger, request, doTheWork)`
+
+`withCapacityReservation` guards one key. A per-user dollar cap inside a global
+one needs two holds, and nesting two calls by hand gets the release and
+reconciliation cases wrong. `withCapacityReservations` is that nesting, built
+from `withCapacityReservation` itself, so its guarantees come from it:
+
+```ts
+const result = await withCapacityReservations(
+  ledger,
+  {
+    scopes: [{ key: `spend:user:${userId}`, limit: 2_000_000 }, { key: 'spend:global', limit: 100_000_000 }],
+    operationId: requestId,
+    amount: hold, // micro-dollars, a safe integer >= 1, held on every scope
+  },
+  async (reservations) => ({ status: 'succeeded', value: reply, settle: { actualAmount: cost } }),
+);
+```
+
+It validates everything (1 to 8 scopes, distinct keys, limits, `operationId`,
+`amount`) before the ledger is called, runs the work at most once and only after
+every scope gave a hold, and resolves to one of:
+
+| Result | Meaning | Holds |
+| --- | --- | --- |
+| `confirmed` | the work succeeded; every scope recorded the same settlement; `overrunAmount` when the actual passed the hold | all confirmed |
+| `refused` (`denied`, `operation_in_progress`, `operation_terminal`, with `scopeKey`) | a ledger would not give a hold; the work did not run | earlier holds released |
+| `released_after_failure` | the work returned `failed` (no charge) | all released |
+| `needs_reconciliation` (with `scopeKey` and that scope's own result) | work of unknown outcome, a failed confirm, or a failed release | kept |
+
+Everything unresolved is `needs_reconciliation`: do not retry paid work, and
+reconcile the named scope. A ledger that rejects on the first scope propagates
+the rejection with no work run.
+
+**Which calls throw and which return.** Static mistakes throw, before any
+ledger call or paid work: invalid requests to `withCapacityReservation` and
+`withCapacityReservations` (a RangeError or TypeError), malformed options, a bad
+pricing table. Runtime conditions return a value: `admitBeforeCall` never throws
+(`unavailable`), `priceFor` returns `unknown-model`, the usage readers return
+`unknown`, and the reservation helpers return their status. A ledger's own
+rejection propagates from the first `reserveCapacity` and becomes
+`work_outcome_ambiguous` / `needs_reconciliation` anywhere after paid work could
+have started.
+
+**`createInMemoryCapacityLedger({ holdMs?, now? })` is for unit tests only.** It
+follows the ledger contract (amounts, idempotent operation ids, confirm and
+release that cannot flip, expiring holds) and lets a test read
+`ledger.usage(key)`, but it is one process's memory: it holds nothing across
+instances or restarts. `withCapacityReservation` compares a hold's `expiresAt`
+with the real clock, so inject `now` only when it tracks the real clock.
+
 ### `createCommitOnce(fn)`: count a stream on its first visible output
 
 Returns a function that runs `fn` at most once, however many times and however
@@ -1149,12 +1702,21 @@ behavior under a network partition or Postgres failover.
   is over-estimated unless you set `ModelRates.cacheReadPerMillion` (see
   above). Server-tool fees, such as per-search charges, are not modeled.
 - **No price data.** Rates you pass can be stale; the library cannot tell.
-- **A count limit is not a dollar budget.** `withCapacityReservation` counts units, and
-  `checkPreCallCeiling` compares an estimate against a spend total you supply. Neither
-  locks a shared dollar budget or settles the difference between estimated and billed cost.
-- **The strict limit lives in your adapter.** This kit ships no
-  `CapacityReservationLedger`, and its tests use single-process in-memory
-  doubles, which prove the helper's call sequencing, not any real storage.
+- **A call cap is not a dollar budget.** `admitBeforeCall` counts attempts, and
+  `checkPreCallCeiling` compares an estimate against a spend total you supply.
+  Dollar budgets are [`withCapacityReservations`](#daily-dollar-caps-per-user-and-global)
+  over a ledger, and they are only as accurate as the estimate that sizes each
+  hold: a low estimate lets concurrent calls overshoot, a high one leaves cap unused.
+- **The strict limit lives in your ledger or store.** This kit ships no
+  production store. It has a Postgres recipe for the capacity ledger (tested on
+  PGlite, and once against a real Postgres with 50 connections), and in-memory
+  doubles that prove the helpers' call sequencing, not any real storage.
+- **Holds are not atomic across scopes.** `withCapacityReservations` takes one
+  hold per scope in order; a refusal on a later scope briefly held capacity on
+  the earlier ones before releasing it. It errs toward refusing.
+- **Aborted streams cost the estimate.** A stream that ends without final usage
+  settles at the full hold, because the provider may have billed it. There is no
+  lease renewal or release-on-cancel.
 - **`withReserveConfirm` is advisory**, returns the successful result with a
   `commitError` field (instead of discarding it) if the commit fails, and
   passes `key` and `limit` through unvalidated. It ignores the value

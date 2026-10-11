@@ -185,7 +185,7 @@ assert.equal(Object.hasOwn(await withReserveConfirm(ledger, 'fresh', 1, async ()
 // Commit once, micros, mappers, dated tables, amount reservations.
 {
   const {
-    createCommitOnce, estimateCostMicros, usageFromAnthropic, usageFromOpenAI,
+    createCommitOnce, estimateCostMicros, usageFromAnthropic, usageFromAnthropicStream, usageFromOpenAI,
     definePricingTable, assertPricingFresh, priceFor,
   } = root;
   let runs = 0;
@@ -217,6 +217,17 @@ assert.equal(Object.hasOwn(await withReserveConfirm(ledger, 'fresh', 1, async ()
   assert.deepEqual(priceFor(table, 'toy:other'), { status: 'unknown-model', key: 'toy:other' });
   assertPricingFresh(table, { now: new Date('2026-10-10T00:00:00Z'), maxAgeDays: 30 });
   assert.throws(() => assertPricingFresh(table, { now: new Date('2027-01-01T00:00:00Z'), maxAgeDays: 30 }), /days old/);
+
+  const mem = root.createInMemoryCapacityLedger();
+  const scoped = await root.withCapacityReservations(
+    mem,
+    { scopes: [{ key: 'u', limit: 100 }, { key: 'g', limit: 100 }], operationId: 'op', amount: 40 },
+    async () => ({ status: 'succeeded', value: 1, settle: { actualAmount: 25 } }),
+  );
+  assert.equal(scoped.status, 'confirmed');
+  assert.deepEqual([mem.usage('u').confirmed, mem.usage('g').confirmed], [25, 25]);
+  assert.equal(usageFromAnthropicStream({ input_tokens: 1, output_tokens: 1 }, undefined).status, 'unknown');
+  assert.equal(root.usageFromOpenAIEmbeddings({ prompt_tokens: 3, total_tokens: 3 }).status, 'known');
 
   const settled = [];
   const amountResult = await withCapacityReservation({
