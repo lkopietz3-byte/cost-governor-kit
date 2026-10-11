@@ -23,7 +23,11 @@ import { fileURLToPath } from 'node:url';
 import { compileFunction } from 'node:vm';
 import { PGlite } from '@electric-sql/pglite';
 import ts from 'typescript';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// Each test may boot a fresh WASM Postgres; that startup alone can pass the
+// 5 s default on a loaded machine. Assertions are unchanged.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 import { admitBeforeCall, type AdmissionStore } from './admission.js';
 
 const readme = readFileSync(fileURLToPath(new URL('../README.md', import.meta.url)), 'utf8');

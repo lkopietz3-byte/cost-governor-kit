@@ -23,7 +23,11 @@ import { fileURLToPath } from 'node:url';
 import { compileFunction, runInNewContext } from 'node:vm';
 import { PGlite } from '@electric-sql/pglite';
 import ts from 'typescript';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+
+// Each test may boot a fresh WASM Postgres; that startup alone can pass the
+// 5 s default on a loaded machine. Assertions are unchanged.
+vi.setConfig({ testTimeout: 60_000, hookTimeout: 60_000 });
 import { createInMemoryAdmissionStore } from './admission.js';
 import { admitBeforeCall, admissionHttpStatus } from './admission.js';
 import { createInMemoryCapacityLedger } from './capacityLedger.js';
