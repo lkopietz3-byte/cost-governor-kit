@@ -24,7 +24,7 @@ const manifest = {
   method: 'Fresh ES2022 module transpilation from the owning src; no dist cache.',
   sources: {}, outputs: {},
 };
-for (const name of ['index', 'internal', 'micros', 'pricing', 'preCallCeiling', 'reserveConfirm', 'admission']) {
+for (const name of ['index', 'internal', 'micros', 'pricing', 'preCallCeiling', 'reserveConfirm', 'admission', 'capacityLedger']) {
   const text = await readFile(path.join(source, `src/${name}.ts`), 'utf8');
   const result = ts.transpileModule(text, { fileName: `${name}.ts`, reportDiagnostics: true, compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ES2022, newLine: ts.NewLineKind.LineFeed } });
   const errors = result.diagnostics?.filter(row => row.category === ts.DiagnosticCategory.Error) || [];
@@ -38,4 +38,4 @@ await writeFile(path.join(destination, 'LICENSE'), license);
 manifest.sources.LICENSE = hash(license);
 manifest.outputs.LICENSE = hash(license);
 await writeFile(path.join(destination, 'source.json'), JSON.stringify(manifest, null, 2) + '\n');
-process.stdout.write(`Prepared ${pkg.name}@${pkg.version}: 7 modules freshly derived from ${manifest.revision.slice(0, 7)}; core source dirty=${manifest.sourceDirty}.\n`);
+process.stdout.write(`Prepared ${pkg.name}@${pkg.version}: 8 modules freshly derived from ${manifest.revision.slice(0, 7)}; core source dirty=${manifest.sourceDirty}.\n`);

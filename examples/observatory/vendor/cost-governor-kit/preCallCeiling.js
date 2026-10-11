@@ -77,6 +77,7 @@ export function checkPreCallCeiling(check) {
     const ceilingUsd = check.ceilingUsd;
     const spentSoFarUsd = check.spentSoFarUsd;
     const estimatedNextCallUsage = check.estimatedNextCallUsage;
+    const requireOutputTokens = check.requireOutputTokens;
     if (!isPlainRecord(rates)) {
         throw new TypeError(RATES_REQUIRED_MESSAGE);
     }
@@ -104,9 +105,24 @@ export function checkPreCallCeiling(check) {
     if (!Number.isFinite(spentSoFarUsd) || spentSoFarUsd < 0) {
         throw new RangeError(`checkPreCallCeiling: spentSoFarUsd must be a non-negative finite number, got ${spentSoFarUsd}`);
     }
+    if (requireOutputTokens !== undefined && typeof requireOutputTokens !== 'boolean') {
+        throw new TypeError('checkPreCallCeiling: requireOutputTokens must be a boolean when present');
+    }
+    let usageToPrice = estimatedNextCallUsage;
+    if (requireOutputTokens === true && isPlainRecord(estimatedNextCallUsage)) {
+        // Copy the usage once, so the presence check and the pricing see the same values.
+        const copy = Object.create(null); // null prototype: an own `__proto__` key stays a key
+        for (const key of Reflect.ownKeys(estimatedNextCallUsage))
+            copy[key] = estimatedNextCallUsage[key];
+        if (copy.outputTokens === undefined) {
+            throw new TypeError('checkPreCallCeiling: estimatedNextCallUsage.outputTokens is required (set it to the request\'s max_tokens bound); ' +
+                'a missing output count would be priced at $0');
+        }
+        usageToPrice = copy;
+    }
     // estimateCostUsd validates the optional cacheReadPerMillion and the usage
     // estimate, from this copy of the rates (never the caller's object again).
-    const projectedNextCallCostUsd = estimateCostUsd({ inputPerMillion, outputPerMillion, cacheReadPerMillion }, estimatedNextCallUsage);
+    const projectedNextCallCostUsd = estimateCostUsd({ inputPerMillion, outputPerMillion, cacheReadPerMillion }, usageToPrice);
     const unroundedProjectedTotalUsd = spentSoFarUsd + projectedNextCallCostUsd;
     if (!Number.isFinite(unroundedProjectedTotalUsd)) {
         throw new Error('checkPreCallCeiling: projected total must remain finite');

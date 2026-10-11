@@ -260,7 +260,7 @@ async function verifySource() {
     const response = await fetch('./vendor/cost-governor-kit/source.json'); if (!response.ok) throw new Error('Local SDK source manifest is unavailable');
     const candidate = await response.json();
     if (candidate.schema !== 'threshold-sdk-source-v1' || candidate.package !== 'cost-governor-kit' || !/^[a-f0-9]{40}$/.test(candidate.revision) || typeof candidate.version !== 'string') throw new Error('Local SDK source manifest has an invalid shape');
-    for (const name of ['index.js', 'internal.js', 'micros.js', 'pricing.js', 'preCallCeiling.js', 'reserveConfirm.js', 'admission.js', 'LICENSE']) {
+    for (const name of ['index.js', 'internal.js', 'micros.js', 'pricing.js', 'preCallCeiling.js', 'reserveConfirm.js', 'admission.js', 'capacityLedger.js', 'LICENSE']) {
       const response = await fetch(`./vendor/cost-governor-kit/${name}`); if (!response.ok) throw new Error(`SDK file unavailable: ${name}`);
       const bytes = await response.arrayBuffer(); const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(value => value.toString(16).padStart(2, '0')).join('');
       if (digest !== candidate.outputs?.[name]) throw new Error(`SDK file does not match its local source manifest: ${name}`);

@@ -286,7 +286,9 @@ export function getRatesOrThrow(table, model) {
  *   RangeError for an invalid count, a cache-write total that disagrees with
  *   its split, or a nonzero server-tool count.
  */
-function parseAnthropicUsage(usage) {
+/** The inference region that carries no surcharge (the API's default). */
+const DEFAULT_INFERENCE_GEO = 'global';
+function parseAnthropicUsage(usage, allowedGeos = []) {
     const fn = 'usageFromAnthropic';
     const record = readProviderRecord(fn, 'usage', usage, [
         'input_tokens',
@@ -296,6 +298,11 @@ function parseAnthropicUsage(usage) {
         'cache_creation',
         'server_tool_use',
         'service_tier',
+        'inference_geo',
+        'output_tokens_details',
+        'speed',
+        'iterations',
+        'fallback_credit',
     ]);
     const inputTokens = readProviderCount(fn, 'input_tokens', record.input_tokens, false);
     const outputTokens = readProviderCount(fn, 'output_tokens', record.output_tokens, false);
@@ -304,6 +311,11 @@ function parseAnthropicUsage(usage) {
     const split = record.cache_creation;
     const serverToolUse = record.server_tool_use;
     const serviceTier = record.service_tier;
+    const inferenceGeo = record.inference_geo;
+    const outputDetails = record.output_tokens_details;
+    const speed = record.speed;
+    const iterations = record.iterations;
+    const fallbackCredit = record.fallback_credit;
     let cacheCreation5mTokens;
     let cacheCreation1hTokens;
     if (split === undefined || split === null) {
@@ -338,6 +350,37 @@ function parseAnthropicUsage(usage) {
     if (serviceTier !== undefined && serviceTier !== null && typeof serviceTier !== 'string') {
         throw new TypeError(`${fn}: service_tier must be a string or null`);
     }
+    // inference_geo: where the request ran. The default region has no surcharge;
+    // another region may be priced differently, so it is unknown unless the
+    // caller says their table already prices it.
+    if (inferenceGeo !== undefined && inferenceGeo !== null) {
+        if (typeof inferenceGeo !== 'string')
+            throw new TypeError(`${fn}: inference_geo must be a string or null`);
+        if (inferenceGeo !== DEFAULT_INFERENCE_GEO && !allowedGeos.includes(inferenceGeo)) {
+            throw new RangeError(`${fn}: inference_geo ${describe(inferenceGeo)} is not the default region, so its price may differ; ` +
+                'pass allowInferenceGeo once your price table covers it');
+        }
+    }
+    // output_tokens_details is a read-only breakdown INSIDE output_tokens (the
+    // billed total), so it never changes the cost; it is only sanity-checked.
+    if (outputDetails !== undefined && outputDetails !== null) {
+        const details = readProviderRecord(fn, 'output_tokens_details', outputDetails, ['thinking_tokens']);
+        const thinking = readProviderCount(fn, 'output_tokens_details.thinking_tokens', details.thinking_tokens, true);
+        if (thinking > outputTokens) {
+            throw new RangeError(`${fn}: output_tokens_details.thinking_tokens (${thinking}) exceeds output_tokens (${outputTokens})`);
+        }
+    }
+    // Beta fields. Their null/default values change nothing; a populated one can
+    // change the bill in a way this kit does not price.
+    if (speed !== undefined && speed !== null && speed !== 'standard') {
+        throw new RangeError(`${fn}: speed ${describe(speed)} is not priced by this kit (fast mode bills differently)`);
+    }
+    if (iterations !== undefined && iterations !== null) {
+        throw new RangeError(`${fn}: iterations is present; per-iteration and compaction usage is not priced by this kit`);
+    }
+    if (fallbackCredit !== undefined && fallbackCredit !== null) {
+        throw new RangeError(`${fn}: fallback_credit is present; credit redemption is not priced by this kit`);
+    }
     return { inputTokens, outputTokens, cacheReadTokens, cacheCreation5mTokens, cacheCreation1hTokens };
 }
 /**
@@ -357,8 +400,8 @@ function parseAnthropicUsage(usage) {
  * - Output maps to `outputTokens`; reasoning and prediction tokens are already
  *   included in it and are only checked (`reasoning_tokens` must not exceed it).
  * - `total_tokens`, when present, must equal prompt + completion.
- * - Audio tokens are billed at different rates, so a nonzero audio count
- *   throws instead of being priced as text.
+ * - Audio tokens, image tokens and cache-write tokens are not priced here, so
+ *   a nonzero count throws (zero is fine). `text_tokens` is informational.
  * - The `*_details` objects, and counts inside them, may be `null` (absent).
  * - Any other key throws a TypeError.
  *
@@ -391,15 +434,22 @@ function parseOpenAIUsage(usage) {
     const outputDetailsRaw = record[outputDetailsKey];
     let cachedTokens = 0;
     if (promptDetailsRaw !== undefined && promptDetailsRaw !== null) {
-        const allowed = chat ? ['cached_tokens', 'audio_tokens'] : ['cached_tokens'];
+        const allowed = chat
+            ? ['cached_tokens', 'audio_tokens', 'cache_write_tokens', 'image_tokens', 'text_tokens']
+            : ['cached_tokens', 'cache_write_tokens'];
         const details = readProviderRecord(fn, promptDetailsKey, promptDetailsRaw, allowed);
         cachedTokens = readProviderCount(fn, `${promptDetailsKey}.cached_tokens`, details.cached_tokens, true);
-        if (chat)
-            assertNoAudio(fn, `${promptDetailsKey}.audio_tokens`, details.audio_tokens);
+        // Cache writes have no priced bucket here: zero is fine, anything else is unknown.
+        assertZero(fn, `${promptDetailsKey}.cache_write_tokens`, details.cache_write_tokens, 'cache writes are not priced for OpenAI by this kit');
+        if (chat) {
+            assertZero(fn, `${promptDetailsKey}.audio_tokens`, details.audio_tokens, 'audio tokens are billed at different rates and are not priced by this kit');
+            assertZero(fn, `${promptDetailsKey}.image_tokens`, details.image_tokens, 'image tokens can be billed at a different rate and are not priced by this kit');
+            readProviderCount(fn, `${promptDetailsKey}.text_tokens`, details.text_tokens, true); // informational
+        }
     }
     if (outputDetailsRaw !== undefined && outputDetailsRaw !== null) {
         const allowed = chat
-            ? ['reasoning_tokens', 'audio_tokens', 'accepted_prediction_tokens', 'rejected_prediction_tokens']
+            ? ['reasoning_tokens', 'audio_tokens', 'accepted_prediction_tokens', 'rejected_prediction_tokens', 'text_tokens']
             : ['reasoning_tokens'];
         const details = readProviderRecord(fn, outputDetailsKey, outputDetailsRaw, allowed);
         const reasoning = readProviderCount(fn, `${outputDetailsKey}.reasoning_tokens`, details.reasoning_tokens, true);
@@ -407,7 +457,8 @@ function parseOpenAIUsage(usage) {
             throw new RangeError(`${fn}: ${outputDetailsKey}.reasoning_tokens (${reasoning}) exceeds ${outputKey} (${outputTokens})`);
         }
         if (chat) {
-            assertNoAudio(fn, `${outputDetailsKey}.audio_tokens`, details.audio_tokens);
+            assertZero(fn, `${outputDetailsKey}.audio_tokens`, details.audio_tokens, 'audio tokens are billed at different rates and are not priced by this kit');
+            readProviderCount(fn, `${outputDetailsKey}.text_tokens`, details.text_tokens, true); // informational
             readProviderCount(fn, `${outputDetailsKey}.accepted_prediction_tokens`, details.accepted_prediction_tokens, true);
             readProviderCount(fn, `${outputDetailsKey}.rejected_prediction_tokens`, details.rejected_prediction_tokens, true);
         }
@@ -423,10 +474,11 @@ function parseOpenAIUsage(usage) {
     }
     return { inputTokens: promptTokens - cachedTokens, outputTokens, cacheReadTokens: cachedTokens };
 }
-function assertNoAudio(fn, path, value) {
+/** A count that must be absent or 0, because a nonzero one is billed in a way this kit does not price. */
+function assertZero(fn, path, value, why) {
     const count = readProviderCount(fn, path, value, true);
     if (count !== 0) {
-        throw new RangeError(`${fn}: ${path} is ${count}; audio tokens are billed at different rates and are not priced by this kit`);
+        throw new RangeError(`${fn}: ${path} is ${count}; ${why}`);
     }
 }
 /** A plain or null-prototype object whose own keys are all in `allowed`. */
@@ -488,13 +540,32 @@ function readUsage(parse, usage) {
         return { status: 'unknown', reason: reasonOf(error) };
     }
 }
+function readAnthropicOptions(options) {
+    if (options === undefined)
+        return [];
+    if (!isPlainRecord(options))
+        throw new TypeError('usageFromAnthropic: options must be an object like { allowInferenceGeo: ["us"] }');
+    for (const key of Reflect.ownKeys(options)) {
+        if (key !== 'allowInferenceGeo')
+            throw new TypeError('usageFromAnthropic: options has an unknown field; expected only allowInferenceGeo');
+    }
+    const geos = Object.hasOwn(options, 'allowInferenceGeo') ? options.allowInferenceGeo : undefined;
+    if (geos === undefined)
+        return [];
+    if (!Array.isArray(geos) || geos.some((g) => typeof g !== 'string' || g === '')) {
+        throw new TypeError('usageFromAnthropic: allowInferenceGeo must be an array of non-empty strings');
+    }
+    return [...geos];
+}
 /**
  * Read an Anthropic Messages API `usage` block: `{ status: 'known', usage }`
- * with the token counts, or `{ status: 'unknown', reason }`. Never throws.
+ * with the token counts, or `{ status: 'unknown', reason }`. Never throws for a
+ * malformed `usage`; only malformed `options` (static configuration) throw.
  *
  * - `input_tokens` and `output_tokens` are required non-negative safe
- *   integers. (A streaming `message_delta` usage alone is incomplete; merge it
- *   with the `message_start` usage first.)
+ *   integers. A streaming `message_start` usage is NOT final (its
+ *   `output_tokens` is a placeholder): read a stream with
+ *   {@link usageFromAnthropicStream}, which wants the closing `message_delta`.
  * - `cache_read_input_tokens` maps to `cacheReadTokens`.
  * - Cache writes: when the `cache_creation` split is present, its
  *   `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` map to the 5m
@@ -505,9 +576,15 @@ function readUsage(parse, usage) {
  * - A cache field that is **absent** (or `null`) counts as 0: older API
  *   versions omit them when no caching was used. One that is present but
  *   malformed makes the reading unknown.
- * - `service_tier` (a string) is accepted and ignored: fold the tier's price
- *   into the prices you pass. `server_tool_use` is accepted only when every
- *   count in it is 0, because per-request tool fees are not priced by this kit.
+ * - Informational fields the SDK declares are accepted: `service_tier` (a
+ *   string; fold the tier's price into your table), `output_tokens_details`
+ *   (a breakdown inside `output_tokens`, which stays the billed total) and
+ *   `inference_geo`. `inference_geo` of `null` or `'global'` is known; another
+ *   region reads as unknown unless you list it in `options.allowInferenceGeo`
+ *   because your table prices it. `server_tool_use` is accepted only when
+ *   every count is 0, because per-request tool fees are not priced here.
+ * - Beta fields are accepted when they are null/default (`speed` of
+ *   `'standard'`, `iterations`, `fallback_credit`) and unknown when populated.
  *
  * The reading is `unknown` when `usage` is missing, `null` or not a plain
  * object; `input_tokens` or `output_tokens` is missing; any count is not a
@@ -518,21 +595,118 @@ function readUsage(parse, usage) {
  * `reason` is a short escaped sentence for logs. Each field is read once, and
  * `-0` reads as `0`.
  */
-export function usageFromAnthropic(usage) {
-    return readUsage(parseAnthropicUsage, usage);
+export function usageFromAnthropic(usage, options) {
+    const geos = readAnthropicOptions(options);
+    return readUsage((u) => parseAnthropicUsage(u, geos), usage);
+}
+/** Usage fields whose null, in a `message_delta`, means "unchanged since `message_start`". */
+const STREAM_NULLABLE_FIELDS = [
+    'input_tokens',
+    'cache_creation_input_tokens',
+    'cache_read_input_tokens',
+    'cache_creation',
+    'output_tokens_details',
+    'server_tool_use',
+    'service_tier',
+    'inference_geo',
+    'speed',
+    'iterations',
+    'fallback_credit',
+];
+/**
+ * Read a finished Anthropic stream: the `message.usage` of the `message_start`
+ * event plus the usage of the final `message_delta` event.
+ *
+ * `message_start` carries the input side with a placeholder `output_tokens`;
+ * `message_delta` carries the cumulative totals. A stream that ended before a
+ * `message_delta` arrived (a client abort, a dropped connection) has no final
+ * usage, so the reading is `unknown` with a reason naming `message_delta`, and
+ * a reservation keeps its full estimate. A `message_delta` whose
+ * `output_tokens` is not a number is not final either.
+ *
+ * Merge rule: for `input_tokens`, the cache counts, `output_tokens_details`
+ * and `server_tool_use`, the delta's value wins when it is not null; otherwise
+ * the start's value is kept. `output_tokens` always comes from the delta. The
+ * `cache_creation` split, `service_tier` and `inference_geo` come from the
+ * start. The merged usage is then read exactly like {@link usageFromAnthropic}
+ * (so a delta total that disagrees with the start's cache split is unknown).
+ * Never throws for malformed events.
+ */
+export function usageFromAnthropicStream(start, delta, options) {
+    const geos = readAnthropicOptions(options);
+    return readUsage(() => {
+        if (delta === undefined || delta === null) {
+            throw new Error('usageFromAnthropicStream: no message_delta usage was seen, so the stream did not finish with final counts');
+        }
+        if (!isPlainRecord(start) || !isPlainRecord(delta)) {
+            throw new TypeError('usageFromAnthropicStream: the message_start and message_delta usage must be plain objects');
+        }
+        // Read every field of both events exactly once.
+        const merged = Object.create(null);
+        for (const key of Reflect.ownKeys(start)) {
+            if (typeof key === 'symbol')
+                throw new TypeError('usageFromAnthropicStream: message_start usage has a symbol key');
+            merged[key] = start[key];
+        }
+        const deltaKeys = Reflect.ownKeys(delta);
+        const deltaValues = new Map();
+        for (const key of deltaKeys) {
+            if (typeof key === 'symbol')
+                throw new TypeError('usageFromAnthropicStream: message_delta usage has a symbol key');
+            deltaValues.set(key, delta[key]);
+        }
+        const deltaOutput = deltaValues.get('output_tokens');
+        if (typeof deltaOutput !== 'number') {
+            throw new Error('usageFromAnthropicStream: the message_delta usage has no numeric output_tokens, so it is not the final message_delta');
+        }
+        merged.output_tokens = deltaOutput;
+        for (const [key, value] of deltaValues) {
+            if (key === 'output_tokens')
+                continue;
+            // For the fields the delta may carry, a null means "no change": the start's
+            // value stays. Any other field is kept exactly as sent, even null, so that
+            // the strict read below refuses a field this version does not know.
+            if ((value === null || value === undefined) && STREAM_NULLABLE_FIELDS.includes(key))
+                continue;
+            merged[key] = value;
+        }
+        return parseAnthropicUsage(merged, geos);
+    }, undefined);
 }
 /**
  * Read an OpenAI `usage` object (Chat Completions or Responses shape):
  * `{ status: 'known', usage }` or `{ status: 'unknown', reason }`. Never
  * throws. Cached prompt tokens become `cacheReadTokens` and are subtracted
- * from `inputTokens`; a Chat Completions shape and a Responses shape mixed
+ * from `inputTokens`. `cache_write_tokens` of 0 is accepted and a nonzero one
+ * is unknown (there is no priced OpenAI cache-write bucket); the same goes for
+ * audio and image tokens. `text_tokens` and `reasoning_tokens` are informational
+ * parts of the totals. A Chat Completions shape and a Responses shape mixed
  * together, cached tokens above the prompt total, a `total_tokens` that does
- * not add up, nonzero audio tokens and every other case that
- * {@link usageFromAnthropic} lists are `unknown`. A response with no `usage`
- * at all is `unknown`, never zero.
+ * not add up and every other case that {@link usageFromAnthropic} lists are
+ * `unknown`. A response with no `usage` at all is `unknown`, never zero. For an
+ * embeddings response use {@link usageFromOpenAIEmbeddings}.
  */
 export function usageFromOpenAI(usage) {
     return readUsage(parseOpenAIUsage, usage);
+}
+/**
+ * Read the `usage` of an OpenAI embeddings response, `{ prompt_tokens,
+ * total_tokens }`, as an input-only reading. It is a separate function because
+ * a chat or Responses usage that lacks its output count must stay unknown;
+ * only you know that this call was an embeddings call. `total_tokens`, when
+ * present, must equal `prompt_tokens`; any other field is unknown.
+ */
+export function usageFromOpenAIEmbeddings(usage) {
+    return readUsage((u) => {
+        const fn = 'usageFromOpenAIEmbeddings';
+        const record = readProviderRecord(fn, 'usage', u, ['prompt_tokens', 'total_tokens']);
+        const promptTokens = readProviderCount(fn, 'prompt_tokens', record.prompt_tokens, false);
+        const totalRaw = record.total_tokens;
+        if (totalRaw !== undefined && readProviderCount(fn, 'total_tokens', totalRaw, false) !== promptTokens) {
+            throw new RangeError(`${fn}: total_tokens does not equal prompt_tokens`);
+        }
+        return { inputTokens: promptTokens };
+    }, usage);
 }
 // ---------------------------------------------------------------------------
 // Dated pricing tables
