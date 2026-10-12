@@ -11,7 +11,7 @@ const manifest = JSON.parse(await readFile(path.join(root, 'vendor/cost-governor
 const hash = data => createHash('sha256').update(data).digest('hex');
 assert.equal(manifest.schema, 'threshold-sdk-source-v1');
 assert.equal(manifest.package, 'cost-governor-kit');
-for (const name of ['index.js', 'internal.js', 'pricing.js', 'preCallCeiling.js', 'reserveConfirm.js', 'LICENSE']) {
+for (const name of ['index.js', 'internal.js', 'micros.js', 'pricing.js', 'preCallCeiling.js', 'reserveConfirm.js', 'admission.js', 'capacityLedger.js', 'LICENSE']) {
   assert.equal(hash(await readFile(path.join(root, 'vendor/cost-governor-kit', name))), manifest.outputs[name], `Prepared file changed: ${name}`);
 }
 if (args[1]) {
@@ -21,4 +21,4 @@ if (args[1]) {
   }
 }
 for (const name of ['index.html', 'style.css', 'app.mjs', 'lib/session.mjs', 'README.md']) await readFile(path.join(root, name));
-process.stdout.write(`Threshold SDK copy: 6 prepared files match their manifest${args[1] ? '; 6 owning source files match' : ''}.\n`);
+process.stdout.write(`Threshold SDK copy: 9 prepared files match their manifest${args[1] ? '; 9 owning source files match' : ''}.\n`);

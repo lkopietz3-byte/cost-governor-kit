@@ -41,7 +41,7 @@
  * reference-impl/supabase-usage-ledger.sql is a Postgres sketch of the
  * advisory `UsageLedger` only; this kit ships no `CapacityReservationLedger`.
  */
-import { describe, isBlank, isPlainRecord } from './internal.js';
+import { describe, isBlank, isPlainRecord, parseIsoInstant } from './internal.js';
 /**
  * Advisory check-then-commit around one async call. Not a concurrent limit.
  *
@@ -115,9 +115,11 @@ export async function withReserveConfirm(ledger, key, limit, doTheCall) {
  * - It reads `request` once (its `limit`, `key` and `operationId`), validates
  *   that snapshot and throws, without calling the adapter, for a `request`
  *   that is not a plain or null-prototype object, a limit that is not a safe
- *   integer >= 0, or a blank key/operationId (empty, or only whitespace and
- *   invisible characters). The adapter receives a fresh
- *   `{ key, limit, operationId }` copy, and every later comparison uses the
+ *   integer >= 0, a blank key/operationId (empty, or only whitespace and
+ *   invisible characters), or an `amount` that is present but not a safe
+ *   integer >= 1. The adapter receives a fresh
+ *   `{ key, limit, operationId }` copy (plus `amount` only when it was given;
+ *   see {@link CapacitySettlement}), and every later comparison uses the
  *   validated values, so neither the caller changing its object nor the
  *   adapter editing its argument can change what a reservation is checked
  *   against.
@@ -135,8 +137,9 @@ export async function withReserveConfirm(ledger, key, limit, doTheCall) {
  * - `{ status: 'succeeded' }` leads to one `confirmReservation` call;
  *   `{ status: 'failed' }` to one `releaseReservation` call. It never calls
  *   both, never calls either twice, and never retries.
- * - A thrown or rejected `doTheWork`, or an outcome of the wrong shape,
- *   returns `work_outcome_ambiguous` and keeps the hold. A failed confirm
+ * - A thrown or rejected `doTheWork`, an outcome of the wrong shape, or an
+ *   outcome whose fields throw when read (a hostile getter or proxy), returns
+ *   `work_outcome_ambiguous` and keeps the hold. A failed confirm
  *   returns `confirmation_failed` (with the value) and keeps the hold.
  * - A rejected `reserveCapacity` propagates; no work runs. A hold may or may
  *   not exist; retry with the same operationId to find out.
@@ -156,12 +159,12 @@ export async function withReserveConfirm(ledger, key, limit, doTheCall) {
  *   returns a decision or reservation of the wrong shape.
  * @throws RangeError for a `limit` that is not a safe integer >= 0, a blank
  *   key, operationId or reservation id, a reservation for a different key or
- *   operationId, an unparseable or already-expired `expiresAt`, a terminal
+ *   operationId, an `expiresAt` that is not a strict ISO-8601 timestamp with a zone, or is already expired, a terminal
  *   decision for a different operation, or an unknown decision status.
  */
 export async function withCapacityReservation(ledger, request, doTheWork) {
-    const { key, limit, operationId } = readReserveCapacityRequest(request);
-    const decision = await ledger.reserveCapacity({ key, limit, operationId });
+    const { key, limit, operationId, amount } = readReserveCapacityRequest(request);
+    const decision = await ledger.reserveCapacity(amount === undefined ? { key, limit, operationId } : { key, limit, operationId, amount });
     if (!decision || typeof decision !== 'object' || !('status' in decision)) {
         throw new TypeError("withCapacityReservation: adapter returned an invalid reservation decision");
     }
@@ -187,16 +190,23 @@ export async function withCapacityReservation(ledger, request, doTheWork) {
         throw new RangeError(`withCapacityReservation: adapter returned unknown reservation decision status ${describe(status)}`);
     }
     const reservation = readReservation(decisionRecord.reservation, key, operationId);
-    let outcome;
+    let parsed;
+    let settlement;
     try {
         // The callback gets a frozen copy, so nothing it does can change the
         // snapshot that is confirmed or released below.
-        outcome = await doTheWork(Object.freeze({ ...reservation }));
+        const outcome = await doTheWork(Object.freeze({ ...reservation }));
+        // Reading the outcome runs the caller's getters or proxy traps. Paid work
+        // has already happened, so a throw here must be the documented ambiguous
+        // result with the hold kept, never an exception that loses the reservation.
+        parsed = readCapacityWorkOutcome(outcome, amount !== undefined);
+        if (parsed?.status === "succeeded" && amount !== undefined) {
+            settlement = readSettle(parsed.settle, amount);
+        }
     }
     catch (error) {
         return { status: "work_outcome_ambiguous", reservation, error };
     }
-    const parsed = readCapacityWorkOutcome(outcome);
     if (!parsed) {
         return {
             status: "work_outcome_ambiguous",
@@ -213,13 +223,49 @@ export async function withCapacityReservation(ledger, request, doTheWork) {
             return { status: "release_failed", reservation, workError: parsed.error, releaseError };
         }
     }
+    if (settlement === undefined) {
+        try {
+            await ledger.confirmReservation(reservation);
+            return { status: "confirmed", reservation, value: parsed.value };
+        }
+        catch (error) {
+            return { status: "confirmation_failed", reservation, value: parsed.value, error };
+        }
+    }
+    // An actual amount above the hold is recorded as is (see readSettle); the
+    // result also says by how much, and only when it happened.
+    const overrun = settlement.amount > settlement.reservedAmount ? { overrunAmount: settlement.amount - settlement.reservedAmount } : {};
     try {
-        await ledger.confirmReservation(reservation);
-        return { status: "confirmed", reservation, value: parsed.value };
+        await ledger.confirmReservation(reservation, settlement);
+        return { status: "confirmed", reservation, value: parsed.value, settlement, ...overrun };
     }
     catch (error) {
-        return { status: "confirmation_failed", reservation, value: parsed.value, error };
+        return { status: "confirmation_failed", reservation, value: parsed.value, error, settlement, ...overrun };
     }
+}
+/** Turn the work's `settle` report into what the adapter records. Throws (making the outcome ambiguous) on anything malformed. */
+function readSettle(settle, reservedAmount) {
+    if (settle === undefined) {
+        return Object.freeze({ usage: "unknown", amount: reservedAmount, reservedAmount });
+    }
+    if (!isPlainRecord(settle)) {
+        throw new TypeError("withCapacityReservation: outcome.settle must be { actualAmount } or { usage: 'unknown' }");
+    }
+    const keys = Reflect.ownKeys(settle);
+    if (keys.length === 1 && keys[0] === "actualAmount") {
+        const actualAmount = settle.actualAmount;
+        if (typeof actualAmount !== "number" || !Number.isSafeInteger(actualAmount) || actualAmount < 0) {
+            throw new RangeError("withCapacityReservation: outcome.settle.actualAmount must be a non-negative safe integer");
+        }
+        return Object.freeze({ usage: "reported", amount: actualAmount + 0, reservedAmount }); // -0 reads as 0
+    }
+    if (keys.length === 1 && keys[0] === "usage") {
+        const usage = settle.usage;
+        if (usage === "unknown") {
+            return Object.freeze({ usage: "unknown", amount: reservedAmount, reservedAmount });
+        }
+    }
+    throw new TypeError("withCapacityReservation: outcome.settle must be { actualAmount } or { usage: 'unknown' }");
 }
 /** Read the request once and validate what was read. Returns plain copies of the three fields. */
 function readReserveCapacityRequest(request) {
@@ -230,6 +276,7 @@ function readReserveCapacityRequest(request) {
     const limit = request.limit;
     const key = request.key;
     const operationId = request.operationId;
+    const amount = request.amount;
     if (typeof limit !== "number") {
         throw new TypeError("withCapacityReservation: limit must be a non-negative safe integer");
     }
@@ -248,8 +295,19 @@ function readReserveCapacityRequest(request) {
     if (isBlank(operationId)) {
         throw new RangeError("withCapacityReservation: operationId must be a non-empty string");
     }
-    return { key, limit, operationId };
+    if (amount === undefined) {
+        return { key, limit, operationId };
+    }
+    if (typeof amount !== "number") {
+        throw new TypeError("withCapacityReservation: amount must be a safe integer >= 1 when present");
+    }
+    if (!Number.isSafeInteger(amount) || amount < 1) {
+        throw new RangeError("withCapacityReservation: amount must be a safe integer >= 1 when present");
+    }
+    return { key, limit, operationId, amount };
 }
+const EXPIRES_AT_MESSAGE = "withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp with a time zone " +
+    "(for example 2026-10-10T16:17:14.411Z or 2026-10-10T11:17:14.411-05:00); a timestamp without Z or an offset is rejected";
 function readReservation(candidate, requestKey, requestOperationId, requireUnexpired = true) {
     if (!candidate || typeof candidate !== "object") {
         throw new TypeError("withCapacityReservation: adapter returned an invalid reservation");
@@ -278,11 +336,14 @@ function readReservation(candidate, requestKey, requestOperationId, requireUnexp
         throw new RangeError("withCapacityReservation: reservation operationId does not match request");
     }
     if (typeof expiresAt !== "string") {
-        throw new TypeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+        throw new TypeError(EXPIRES_AT_MESSAGE);
     }
-    const expiresAtMs = Date.parse(expiresAt);
-    if (!Number.isFinite(expiresAtMs)) {
-        throw new RangeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+    // Strict, zone-required parse. `Date.parse` would read a string without a
+    // zone as this machine's local time, so the same hold could look live or
+    // expired depending on the server's TZ.
+    const expiresAtMs = parseIsoInstant(expiresAt);
+    if (expiresAtMs === undefined) {
+        throw new RangeError(EXPIRES_AT_MESSAGE);
     }
     if (requireUnexpired && expiresAtMs <= Date.now()) {
         throw new RangeError("withCapacityReservation: adapter returned an expired reservation");
@@ -290,16 +351,267 @@ function readReservation(candidate, requestKey, requestOperationId, requireUnexp
     return { ...copy, id, key, operationId, expiresAt };
 }
 /** Read a work outcome once. Returns `undefined` for anything that is not a well-formed outcome. */
-function readCapacityWorkOutcome(value) {
+function readCapacityWorkOutcome(value, readSettleField = false) {
     if (!value || typeof value !== "object")
         return undefined;
     const record = value;
     const status = record.status;
     if (status === "succeeded") {
-        return Object.prototype.hasOwnProperty.call(record, "value") ? { status, value: record.value } : undefined;
+        if (!Object.prototype.hasOwnProperty.call(record, "value"))
+            return undefined;
+        const outcomeValue = record.value;
+        // Read only for an `amount` request, so every other outcome is read exactly as before.
+        const settle = readSettleField && Object.prototype.hasOwnProperty.call(record, "settle") ? record.settle : undefined;
+        return { status, value: outcomeValue, settle };
     }
     if (status === "failed") {
         return Object.prototype.hasOwnProperty.call(record, "error") ? { status, error: record.error } : undefined;
     }
     return undefined;
+}
+/**
+ * Wrap a commit (for example `commitUsage`) so it runs at most once, however
+ * many times and however concurrently it is called. Made for counting a
+ * streamed call on its FIRST visible output: call the returned function from
+ * every chunk handler, and the usage is recorded exactly once, as soon as the
+ * user has seen something.
+ *
+ * - The first call runs `fn` synchronously and returns a promise of its
+ *   result. Every other call, concurrent or later, returns that same promise
+ *   and never runs `fn` again.
+ * - A failure is surfaced, not swallowed: if `fn` throws or rejects, the
+ *   shared promise rejects with that error for every caller, including later
+ *   ones, and `state` becomes `failed`.
+ * - **A failed commit cannot be retried through the same instance.** `fn`
+ *   runs at most once, ever. A commit can fail after its write landed (a lost
+ *   reply), so retrying automatically could count the call twice. Decide in
+ *   your own code whether to reconcile or create a new `createCommitOnce` for
+ *   a deliberate retry.
+ * - Await the returned promise to see a failure. The instance tracks `state`
+ *   with its own handler, so a fire-and-forget call does not produce an
+ *   unhandled rejection; it is not silent either, because `state` stays
+ *   `failed` and every later call rejects with the same error.
+ *
+ * It keeps no timers and no global state; each call to `createCommitOnce`
+ * makes an independent instance.
+ *
+ * @example
+ *   const countOnce = createCommitOnce(() => ledger.commitUsage(`${userId}:${today}`));
+ *   for await (const chunk of stream) {
+ *     if (chunk.text) await countOnce(); // counted on first visible output, once
+ *     write(chunk.text);
+ *   }
+ *   // countOnce.state === 'idle' here means nothing was shown and nothing was counted.
+ *
+ * @throws TypeError (synchronously, at creation) when `fn` is not a function.
+ */
+export function createCommitOnce(fn) {
+    if (typeof fn !== "function") {
+        throw new TypeError("createCommitOnce: fn must be a function");
+    }
+    let state = "idle";
+    let shared;
+    const commit = () => {
+        if (shared)
+            return shared;
+        let resolveShared;
+        let rejectShared;
+        // Assign the shared promise before running fn, so a re-entrant call from
+        // inside fn joins it instead of running fn a second time.
+        shared = new Promise((resolve, reject) => {
+            resolveShared = resolve;
+            rejectShared = reject;
+        });
+        state = "pending";
+        const settled = shared.then(() => {
+            state = "committed";
+        }, () => {
+            state = "failed";
+        });
+        void settled;
+        try {
+            resolveShared(fn());
+        }
+        catch (error) {
+            rejectShared(error);
+        }
+        return shared;
+    };
+    const attempt = () => {
+        const ran = shared === undefined; // true only for the call that is about to run fn
+        return commit().then((value) => ({ ran, status: "committed", value }), (error) => ({ ran, status: "failed", error }));
+    };
+    Object.defineProperty(commit, "state", { get: () => state, enumerable: true });
+    Object.defineProperty(commit, "attempt", { value: attempt, enumerable: true });
+    return commit;
+}
+const MAX_RESERVATION_SCOPES = 8;
+/**
+ * Reserve the same amount on several scopes, run paid work once, and settle
+ * every scope: the daily-dollars-per-user-and-global pattern.
+ *
+ * It is {@link withCapacityReservation} nested once per scope, in request
+ * order, so everything that function guarantees holds for each scope: work runs
+ * at most once and only after EVERY scope gave a hold; it never retries; a
+ * thrown or malformed outcome keeps every hold; confirm and release are each
+ * called at most once per scope. What it adds is the bookkeeping nobody should
+ * hand-write:
+ *
+ * - If a later scope refuses, the holds already taken are released (no paid
+ *   work ran), and the result names the refusing scope.
+ * - If the work fails (`failed`), every hold is released.
+ * - If the work succeeds, every scope is confirmed with the same settlement:
+ *   the reported `actualAmount`, or the full estimate for `{ usage: 'unknown' }`
+ *   (a missing `settle` means unknown). An actual above the hold is recorded as
+ *   is and reported as `overrunAmount`.
+ * - Anything unresolved (ambiguous work, a failed confirm, a failed release)
+ *   returns `needs_reconciliation` with the scope's own result, and the holds
+ *   stay in place.
+ *
+ * Holds are taken one ledger round trip per scope, so this is not atomic across
+ * scopes: a refusal on the second scope briefly held capacity on the first.
+ * That errs toward refusing, never toward overspending.
+ *
+ * Invalid input (no scopes, more than 8, duplicate or blank keys, a bad limit
+ * or amount) throws before the ledger is called. A ledger that rejects on the
+ * first scope propagates the rejection, with no work run; on a later scope the
+ * earlier holds are kept and the result is `needs_reconciliation`.
+ *
+ * `doTheWork` receives a frozen array of the holds, in request order.
+ */
+export async function withCapacityReservations(ledger, request, doTheWork) {
+    const fn = 'withCapacityReservations';
+    if (!isPlainRecord(request)) {
+        throw new TypeError(`${fn}: request must be an object with scopes, operationId and amount (a plain object)`);
+    }
+    const rawScopes = request.scopes;
+    const operationId = request.operationId;
+    const amount = request.amount;
+    if (!Array.isArray(rawScopes)) {
+        throw new TypeError(`${fn}: scopes must be an array of { key, limit }`);
+    }
+    const count = rawScopes.length;
+    if (count < 1 || count > MAX_RESERVATION_SCOPES) {
+        throw new RangeError(`${fn}: scopes must have between 1 and ${MAX_RESERVATION_SCOPES} entries`);
+    }
+    if (amount === undefined) {
+        throw new TypeError(`${fn}: amount is required: a safe integer >= 1`);
+    }
+    const scopes = [];
+    const seen = new Set();
+    for (let i = 0; i < count; i++) {
+        const scope = rawScopes[i];
+        if (!isPlainRecord(scope)) {
+            throw new TypeError(`${fn}: scopes[${i}] must be a plain { key, limit } object`);
+        }
+        const read = readReserveCapacityRequest({
+            key: scope.key,
+            limit: scope.limit,
+            operationId: operationId,
+            amount: amount,
+        });
+        if (seen.has(read.key)) {
+            throw new RangeError(`${fn}: scopes must have distinct keys`);
+        }
+        seen.add(read.key);
+        scopes.push({ key: read.key, limit: read.limit, operationId: read.operationId, amount: read.amount });
+    }
+    if (typeof doTheWork !== 'function') {
+        throw new TypeError(`${fn}: doTheWork must be a function`);
+    }
+    const held = [];
+    async function level(i) {
+        const scope = scopes[i];
+        let deeperProblem;
+        const result = await withCapacityReservation(ledger, scope, async (reservation) => {
+            held[i] = reservation;
+            let inner;
+            if (i + 1 < scopes.length) {
+                inner = await level(i + 1);
+            }
+            else {
+                // The innermost level runs the paid work. The outcome is read once here;
+                // a throw, a getter that throws or a malformed outcome keeps every hold.
+                const outcome = await doTheWork(Object.freeze([...held]));
+                inner = { kind: 'done', outcome: readScopedOutcome(outcome) };
+            }
+            switch (inner.kind) {
+                case 'done':
+                    return inner.outcome.status === 'succeeded'
+                        ? { status: 'succeeded', value: inner, settle: inner.outcome.settle }
+                        : { status: 'failed', error: inner };
+                case 'confirmed':
+                    return { status: 'succeeded', value: inner, settle: settleOf(inner.settlement) };
+                case 'refused':
+                case 'failed':
+                    return { status: 'failed', error: inner };
+                case 'problem':
+                    deeperProblem = inner;
+                    throw new Error(`${fn}: a deeper scope needs reconciliation, so this hold is kept`);
+            }
+        });
+        switch (result.status) {
+            case 'denied':
+                return { kind: 'refused', refusal: 'denied', scopeKey: scope.key, ...(result.reason === undefined ? {} : { reason: result.reason }) };
+            case 'operation_in_progress':
+                return { kind: 'refused', refusal: 'operation_in_progress', scopeKey: scope.key };
+            case 'operation_terminal':
+                return { kind: 'refused', refusal: 'operation_terminal', scopeKey: scope.key, ...(result.reason === undefined ? {} : { reason: result.reason }) };
+            case 'confirmed': {
+                const inner = result.value;
+                const value = inner.kind === 'done' ? inner.outcome.value : inner.value;
+                return {
+                    kind: 'confirmed',
+                    value,
+                    settlement: result.settlement,
+                    ...(result.overrunAmount === undefined ? {} : { overrunAmount: result.overrunAmount }),
+                };
+            }
+            case 'released_after_failure': {
+                const inner = result.error;
+                if (inner.kind === 'done')
+                    return { kind: 'failed', error: inner.outcome.error };
+                return inner; // refused or failed, from a deeper scope
+            }
+            case 'work_outcome_ambiguous':
+                return deeperProblem ?? { kind: 'problem', scopeKey: scope.key, result };
+            case 'release_failed':
+            case 'confirmation_failed':
+                return { kind: 'problem', scopeKey: scope.key, result };
+        }
+    }
+    const top = await level(0);
+    switch (top.kind) {
+        case 'confirmed':
+            return {
+                status: 'confirmed',
+                value: top.value,
+                settlement: top.settlement,
+                ...(top.overrunAmount === undefined ? {} : { overrunAmount: top.overrunAmount }),
+                reservations: Object.freeze([...held]),
+            };
+        case 'refused':
+            return { status: 'refused', refusal: top.refusal, scopeKey: top.scopeKey, ...(top.reason === undefined ? {} : { reason: top.reason }) };
+        case 'failed':
+            return { status: 'released_after_failure', error: top.error };
+        case 'problem':
+            return { status: 'needs_reconciliation', scopeKey: top.scopeKey, result: top.result };
+        case 'done':
+            // Unreachable: level() never returns 'done'. Fail closed if it ever does.
+            throw new Error(`${fn}: internal error: unresolved work outcome`);
+    }
+}
+/** Settle value that records the same amount a confirmed scope recorded. */
+function settleOf(settlement) {
+    return settlement.usage === 'reported' ? { actualAmount: settlement.amount } : { usage: 'unknown' };
+}
+/** Read the paid work's outcome once. Throws (keeping every hold) on anything malformed. */
+function readScopedOutcome(outcome) {
+    const parsed = readCapacityWorkOutcome(outcome, true);
+    if (!parsed) {
+        throw new Error('withCapacityReservations: doTheWork returned an invalid outcome');
+    }
+    return parsed.status === 'succeeded'
+        ? { status: 'succeeded', value: parsed.value, settle: parsed.settle }
+        : { status: 'failed', error: parsed.error };
 }

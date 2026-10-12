@@ -29,7 +29,22 @@
  * different number.
  */
 
-import { describe, escapeText, isPlainRecord } from './internal.js';
+import { describe, escapeText, isBlank, isPlainRecord, parseIsoInstant } from './internal.js';
+import {
+  buildMicrosRates,
+  estimateCostMicros,
+  priceFor,
+  type DatedPricingTable,
+  type LongContextRates,
+  type MicrosPrice,
+  type MicrosRates,
+  type PriceLookup,
+  type PricingTableDefinition,
+} from './micros.js';
+
+// Integer-micro prices, tables and exact cost math live in micros.ts.
+export { estimateCostMicros, priceFor };
+export type { DatedPricingTable, LongContextRates, MicrosPrice, MicrosRates, PriceLookup, PricingTableDefinition };
 
 /**
  * List-price rates for one model, supplied by the caller. This library ships
@@ -164,66 +179,7 @@ export interface UsageTokens {
  *   not a single bad input field.
  */
 export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
-  if (!isPlainRecord(rates)) {
-    throw new TypeError(
-      'estimateCostUsd: rates must be an object with inputPerMillion and outputPerMillion ' +
-        '(a plain object; not null, an array, a Map, a Date or a class instance)',
-    );
-  }
-  const inputPerMillion: unknown = rates.inputPerMillion;
-  assertRate('inputPerMillion', inputPerMillion);
-  const outputPerMillion: unknown = rates.outputPerMillion;
-  assertRate('outputPerMillion', outputPerMillion);
-  const cacheReadPerMillion: unknown = rates.cacheReadPerMillion;
-  if (cacheReadPerMillion !== undefined) {
-    assertRate('cacheReadPerMillion', cacheReadPerMillion);
-  }
-  if (!isPlainRecord(usage)) {
-    throw new TypeError(
-      'estimateCostUsd: usage must be an object of token counts ' +
-        '(a plain object; not null, an array, a Map, a Date or a class instance)',
-    );
-  }
-  // An unrecognized key (a provider's snake_case field, a typo) would
-  // otherwise be ignored and its tokens priced at $0. Every own key counts,
-  // enumerable or not and string or symbol, so a field cannot hide from this
-  // check. A known field that is not enumerable is still read below.
-  for (const key of Reflect.ownKeys(usage)) {
-    if (typeof key === 'symbol') {
-      throw new TypeError(
-        'estimateCostUsd: usage has an unknown symbol-keyed field; ' +
-          `expected only ${USAGE_FIELDS.join(', ')}`,
-      );
-    }
-    if (!USAGE_FIELDS.includes(key as keyof UsageTokens)) {
-      throw new TypeError(
-        `estimateCostUsd: usage has unknown field ${describe(key)}; ` +
-          `expected only ${USAGE_FIELDS.join(', ')}`,
-      );
-    }
-  }
-
-  const inputTokens = tokenCountOrZero('inputTokens', usage.inputTokens);
-  const outputTokens = tokenCountOrZero('outputTokens', usage.outputTokens);
-  const cacheReadTokens = tokenCountOrZero('cacheReadTokens', usage.cacheReadTokens);
-  const cacheCreation5mTokens = tokenCountOrZero('cacheCreation5mTokens', usage.cacheCreation5mTokens);
-  const cacheCreation1hTokens = tokenCountOrZero('cacheCreation1hTokens', usage.cacheCreation1hTokens);
-
-  // Preserve the original multiply-sum-divide order for the default path
-  // (no override) exactly, so existing rounding results do not shift by a
-  // floating-point ULP: only substitute a different expression when
-  // cacheReadPerMillion is actually present.
-  const cacheReadCostUsd =
-    cacheReadPerMillion !== undefined
-      ? cacheReadTokens * cacheReadPerMillion
-      : cacheReadTokens * inputPerMillion * CACHE_READ_MULTIPLIER;
-
-  const unscaledCostUsd =
-    inputTokens * inputPerMillion +
-    cacheReadCostUsd +
-    cacheCreation5mTokens * inputPerMillion * CACHE_CREATION_5M_MULTIPLIER +
-    cacheCreation1hTokens * inputPerMillion * CACHE_CREATION_1H_MULTIPLIER +
-    outputTokens * outputPerMillion;
+  const unscaledCostUsd = sumUnscaledMicros('estimateCostUsd', rates, usage);
 
   // An overflowed sum is Infinity, and Infinity / 1e6 is still Infinity, so
   // this one check also covers the sum.
@@ -235,6 +191,76 @@ export function estimateCostUsd(rates: ModelRates, usage: UsageTokens): number {
   return roundToMicroDollar(costUsd);
 }
 
+/**
+ * Validate `rates` and `usage` exactly as {@link estimateCostUsd} documents
+ * and return the unscaled sum `input x inRate + ... + output x outRate`,
+ * which is the cost in micro-dollars before rounding. `fn` prefixes error
+ * messages.
+ */
+function sumUnscaledMicros(fn: string, rates: ModelRates, usage: UsageTokens): number {
+  if (!isPlainRecord(rates)) {
+    throw new TypeError(
+      `${fn}: rates must be an object with inputPerMillion and outputPerMillion ` +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
+    );
+  }
+  const inputPerMillion: unknown = rates.inputPerMillion;
+  assertRate('inputPerMillion', inputPerMillion, fn);
+  const outputPerMillion: unknown = rates.outputPerMillion;
+  assertRate('outputPerMillion', outputPerMillion, fn);
+  const cacheReadPerMillion: unknown = rates.cacheReadPerMillion;
+  if (cacheReadPerMillion !== undefined) {
+    assertRate('cacheReadPerMillion', cacheReadPerMillion, fn);
+  }
+  if (!isPlainRecord(usage)) {
+    throw new TypeError(
+      `${fn}: usage must be an object of token counts ` +
+        '(a plain object; not null, an array, a Map, a Date or a class instance)',
+    );
+  }
+  // An unrecognized key (a provider's snake_case field, a typo) would
+  // otherwise be ignored and its tokens priced at $0. Every own key counts,
+  // enumerable or not and string or symbol, so a field cannot hide from this
+  // check. A known field that is not enumerable is still read below.
+  for (const key of Reflect.ownKeys(usage)) {
+    if (typeof key === 'symbol') {
+      throw new TypeError(
+        `${fn}: usage has an unknown symbol-keyed field; ` +
+          `expected only ${USAGE_FIELDS.join(', ')}`,
+      );
+    }
+    if (!USAGE_FIELDS.includes(key as keyof UsageTokens)) {
+      throw new TypeError(
+        `${fn}: usage has unknown field ${describe(key)}; ` +
+          `expected only ${USAGE_FIELDS.join(', ')}`,
+      );
+    }
+  }
+
+  const inputTokens = tokenCountOrZero('inputTokens', usage.inputTokens, fn);
+  const outputTokens = tokenCountOrZero('outputTokens', usage.outputTokens, fn);
+  const cacheReadTokens = tokenCountOrZero('cacheReadTokens', usage.cacheReadTokens, fn);
+  const cacheCreation5mTokens = tokenCountOrZero('cacheCreation5mTokens', usage.cacheCreation5mTokens, fn);
+  const cacheCreation1hTokens = tokenCountOrZero('cacheCreation1hTokens', usage.cacheCreation1hTokens, fn);
+
+  // Preserve the original multiply-sum-divide order for the default path
+  // (no override) exactly, so existing rounding results do not shift by a
+  // floating-point ULP: only substitute a different expression when
+  // cacheReadPerMillion is actually present.
+  const cacheReadCostUsd =
+    cacheReadPerMillion !== undefined
+      ? cacheReadTokens * cacheReadPerMillion
+      : cacheReadTokens * inputPerMillion * CACHE_READ_MULTIPLIER;
+
+  return (
+    inputTokens * inputPerMillion +
+    cacheReadCostUsd +
+    cacheCreation5mTokens * inputPerMillion * CACHE_CREATION_5M_MULTIPLIER +
+    cacheCreation1hTokens * inputPerMillion * CACHE_CREATION_1H_MULTIPLIER +
+    outputTokens * outputPerMillion
+  );
+}
+
 const USAGE_FIELDS: ReadonlyArray<keyof UsageTokens> = [
   'inputTokens',
   'outputTokens',
@@ -243,24 +269,24 @@ const USAGE_FIELDS: ReadonlyArray<keyof UsageTokens> = [
   'cacheCreation1hTokens',
 ];
 
-function assertRate(field: keyof ModelRates, value: unknown): asserts value is number {
+function assertRate(field: keyof ModelRates, value: unknown, fn = 'estimateCostUsd'): asserts value is number {
   if (typeof value !== 'number') {
-    throw new TypeError(`estimateCostUsd: rates.${field} must be a non-negative finite number`);
+    throw new TypeError(`${fn}: rates.${field} must be a non-negative finite number`);
   }
   if (!Number.isFinite(value) || value < 0) {
-    throw new RangeError(`estimateCostUsd: rates.${field} must be a non-negative finite number`);
+    throw new RangeError(`${fn}: rates.${field} must be a non-negative finite number`);
   }
 }
 
-function tokenCountOrZero(field: keyof UsageTokens, value: unknown): number {
+function tokenCountOrZero(field: keyof UsageTokens, value: unknown, fn = 'estimateCostUsd'): number {
   if (value === undefined) {
     return 0;
   }
   if (typeof value !== 'number') {
-    throw new TypeError(`estimateCostUsd: usage.${field} must be a non-negative safe integer`);
+    throw new TypeError(`${fn}: usage.${field} must be a non-negative safe integer`);
   }
   if (!Number.isSafeInteger(value) || value < 0) {
-    throw new RangeError(`estimateCostUsd: usage.${field} must be a non-negative safe integer`);
+    throw new RangeError(`${fn}: usage.${field} must be a non-negative safe integer`);
   }
   return value;
 }
@@ -345,4 +371,651 @@ export function getRatesOrThrow(table: PricingTable, model: string): ModelRates 
     );
   }
   return rates;
+}
+
+// ---------------------------------------------------------------------------
+// Provider usage mappers
+// ---------------------------------------------------------------------------
+
+/**
+ * The strict parser behind {@link usageFromAnthropic}: it maps an Anthropic
+ * Messages API `usage` block to {@link UsageTokens} and THROWS wherever the
+ * public function reports `unknown`.
+ *
+ * - `input_tokens` and `output_tokens` are required non-negative safe
+ *   integers. (A streaming `message_delta` usage alone is incomplete; merge it
+ *   with the `message_start` usage first.)
+ * - `cache_read_input_tokens` maps to `cacheReadTokens`.
+ * - Cache writes: when the `cache_creation` split is present, its
+ *   `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` map to the 5m
+ *   and 1h buckets, and `cache_creation_input_tokens`, if also present, must
+ *   equal their sum. When the split is absent, the whole
+ *   `cache_creation_input_tokens` total is priced as 5-minute writes (the
+ *   default TTL), never dropped.
+ * - `service_tier` (a string) is accepted and ignored: fold the tier's price
+ *   into the prices you pass. `server_tool_use` is accepted only when every
+ *   count in it is 0, because per-request tool fees are not priced by this
+ *   kit; price them separately and pass a copy without that field.
+ * - Nullable fields (`cache_*`, `cache_creation`, `server_tool_use`,
+ *   `service_tier`) may be `null`, which counts as absent.
+ * - Any other key, at the top level or inside `cache_creation` or
+ *   `server_tool_use`, throws a TypeError, so a field this version does not
+ *   know about is never priced at $0.
+ *
+ * @throws TypeError for a non-object, an unknown key or a wrong type;
+ *   RangeError for an invalid count, a cache-write total that disagrees with
+ *   its split, or a nonzero server-tool count.
+ */
+/** The inference region that carries no surcharge (the API's default). */
+const DEFAULT_INFERENCE_GEO = 'global';
+
+function parseAnthropicUsage(usage: unknown, allowedGeos: readonly string[] = []): UsageTokens {
+  const fn = 'usageFromAnthropic';
+  const record = readProviderRecord(fn, 'usage', usage, [
+    'input_tokens',
+    'output_tokens',
+    'cache_creation_input_tokens',
+    'cache_read_input_tokens',
+    'cache_creation',
+    'server_tool_use',
+    'service_tier',
+    'inference_geo',
+    'output_tokens_details',
+    'speed',
+    'iterations',
+    'fallback_credit',
+  ]);
+  const inputTokens = readProviderCount(fn, 'input_tokens', record.input_tokens, false);
+  const outputTokens = readProviderCount(fn, 'output_tokens', record.output_tokens, false);
+  const cacheReadTokens = readProviderCount(fn, 'cache_read_input_tokens', record.cache_read_input_tokens, true);
+  const creationTotal: unknown = record.cache_creation_input_tokens;
+  const split: unknown = record.cache_creation;
+  const serverToolUse: unknown = record.server_tool_use;
+  const serviceTier: unknown = record.service_tier;
+  const inferenceGeo: unknown = record.inference_geo;
+  const outputDetails: unknown = record.output_tokens_details;
+  const speed: unknown = record.speed;
+  const iterations: unknown = record.iterations;
+  const fallbackCredit: unknown = record.fallback_credit;
+
+  let cacheCreation5mTokens: number;
+  let cacheCreation1hTokens: number;
+  if (split === undefined || split === null) {
+    cacheCreation5mTokens = readProviderCount(fn, 'cache_creation_input_tokens', creationTotal, true);
+    cacheCreation1hTokens = 0;
+  } else {
+    const splitRecord = readProviderRecord(fn, 'cache_creation', split, [
+      'ephemeral_5m_input_tokens',
+      'ephemeral_1h_input_tokens',
+    ]);
+    cacheCreation5mTokens = readProviderCount(fn, 'cache_creation.ephemeral_5m_input_tokens', splitRecord.ephemeral_5m_input_tokens, true);
+    cacheCreation1hTokens = readProviderCount(fn, 'cache_creation.ephemeral_1h_input_tokens', splitRecord.ephemeral_1h_input_tokens, true);
+    if (creationTotal !== undefined && creationTotal !== null) {
+      const total = readProviderCount(fn, 'cache_creation_input_tokens', creationTotal, true);
+      if (total !== cacheCreation5mTokens + cacheCreation1hTokens) {
+        throw new RangeError(
+          `${fn}: cache_creation_input_tokens (${total}) does not equal the cache_creation split ` +
+            `(${cacheCreation5mTokens} + ${cacheCreation1hTokens}); refusing to guess which is right`,
+        );
+      }
+    }
+  }
+
+  if (serverToolUse !== undefined && serverToolUse !== null) {
+    const tools = readProviderRecord(fn, 'server_tool_use', serverToolUse, ['web_search_requests', 'web_fetch_requests']);
+    for (const name of ['web_search_requests', 'web_fetch_requests'] as const) {
+      const count = readProviderCount(fn, `server_tool_use.${name}`, tools[name], true);
+      if (count !== 0) {
+        throw new RangeError(
+          `${fn}: server_tool_use.${name} is ${count}; per-request tool fees are not priced by this kit. ` +
+            'Price them separately and pass a copy of usage without server_tool_use.',
+        );
+      }
+    }
+  }
+  if (serviceTier !== undefined && serviceTier !== null && typeof serviceTier !== 'string') {
+    throw new TypeError(`${fn}: service_tier must be a string or null`);
+  }
+
+  // inference_geo: where the request ran. The default region has no surcharge;
+  // another region may be priced differently, so it is unknown unless the
+  // caller says their table already prices it.
+  if (inferenceGeo !== undefined && inferenceGeo !== null) {
+    if (typeof inferenceGeo !== 'string') throw new TypeError(`${fn}: inference_geo must be a string or null`);
+    if (inferenceGeo !== DEFAULT_INFERENCE_GEO && !allowedGeos.includes(inferenceGeo)) {
+      throw new RangeError(
+        `${fn}: inference_geo ${describe(inferenceGeo)} is not the default region, so its price may differ; ` +
+          'pass allowInferenceGeo once your price table covers it',
+      );
+    }
+  }
+  // output_tokens_details is a read-only breakdown INSIDE output_tokens (the
+  // billed total), so it never changes the cost; it is only sanity-checked.
+  if (outputDetails !== undefined && outputDetails !== null) {
+    const details = readProviderRecord(fn, 'output_tokens_details', outputDetails, ['thinking_tokens']);
+    const thinking = readProviderCount(fn, 'output_tokens_details.thinking_tokens', details.thinking_tokens, true);
+    if (thinking > outputTokens) {
+      throw new RangeError(`${fn}: output_tokens_details.thinking_tokens (${thinking}) exceeds output_tokens (${outputTokens})`);
+    }
+  }
+  // Beta fields. Their null/default values change nothing; a populated one can
+  // change the bill in a way this kit does not price.
+  if (speed !== undefined && speed !== null && speed !== 'standard') {
+    throw new RangeError(`${fn}: speed ${describe(speed)} is not priced by this kit (fast mode bills differently)`);
+  }
+  if (iterations !== undefined && iterations !== null) {
+    throw new RangeError(`${fn}: iterations is present; per-iteration and compaction usage is not priced by this kit`);
+  }
+  if (fallbackCredit !== undefined && fallbackCredit !== null) {
+    throw new RangeError(`${fn}: fallback_credit is present; credit redemption is not priced by this kit`);
+  }
+
+  return { inputTokens, outputTokens, cacheReadTokens, cacheCreation5mTokens, cacheCreation1hTokens };
+}
+
+/**
+ * The strict parser behind {@link usageFromOpenAI}: it maps an OpenAI `usage`
+ * object to {@link UsageTokens} and THROWS wherever the public function
+ * reports `unknown`. Accepts either the
+ * Chat Completions shape (`prompt_tokens`, `completion_tokens`,
+ * `prompt_tokens_details`, `completion_tokens_details`) or the Responses API
+ * shape (`input_tokens`, `output_tokens`, `input_tokens_details`,
+ * `output_tokens_details`), never a mix.
+ *
+ * - Cached prompt tokens (`*_details.cached_tokens`) map to `cacheReadTokens`
+ *   and are subtracted from the prompt total to get uncached `inputTokens`.
+ *   **Set `cacheReadPerMTokMicros` in your price**: OpenAI's cached-input
+ *   discount differs by model, and `estimateCostMicros` throws for cache reads
+ *   with no cache-read price.
+ * - Output maps to `outputTokens`; reasoning and prediction tokens are already
+ *   included in it and are only checked (`reasoning_tokens` must not exceed it).
+ * - `total_tokens`, when present, must equal prompt + completion.
+ * - Audio tokens, image tokens and cache-write tokens are not priced here, so
+ *   a nonzero count throws (zero is fine). `text_tokens` is informational.
+ * - The `*_details` objects, and counts inside them, may be `null` (absent).
+ * - Any other key throws a TypeError.
+ *
+ * @throws TypeError for a non-object, an unknown key, a mixed shape or a wrong
+ *   type; RangeError for an invalid count, cached tokens above the prompt
+ *   total, reasoning tokens above the output, a total that does not add up,
+ *   or nonzero audio tokens.
+ */
+function parseOpenAIUsage(usage: unknown): UsageTokens {
+  const fn = 'usageFromOpenAI';
+  const chatKeys = ['prompt_tokens', 'completion_tokens', 'total_tokens', 'prompt_tokens_details', 'completion_tokens_details'];
+  const responsesKeys = ['input_tokens', 'output_tokens', 'total_tokens', 'input_tokens_details', 'output_tokens_details'];
+  const record = readProviderRecord(fn, 'usage', usage, [...new Set([...chatKeys, ...responsesKeys])]);
+  const hasChat = Object.hasOwn(record, 'prompt_tokens') || Object.hasOwn(record, 'completion_tokens') ||
+    Object.hasOwn(record, 'prompt_tokens_details') || Object.hasOwn(record, 'completion_tokens_details');
+  const hasResponses = Object.hasOwn(record, 'input_tokens') || Object.hasOwn(record, 'output_tokens') ||
+    Object.hasOwn(record, 'input_tokens_details') || Object.hasOwn(record, 'output_tokens_details');
+  if (hasChat && hasResponses) {
+    throw new TypeError(`${fn}: usage mixes Chat Completions fields (prompt_/completion_) with Responses fields (input_/output_)`);
+  }
+  const chat = !hasResponses;
+  const promptKey = chat ? 'prompt_tokens' : 'input_tokens';
+  const outputKey = chat ? 'completion_tokens' : 'output_tokens';
+  const promptDetailsKey = chat ? 'prompt_tokens_details' : 'input_tokens_details';
+  const outputDetailsKey = chat ? 'completion_tokens_details' : 'output_tokens_details';
+
+  const promptTokens = readProviderCount(fn, promptKey, record[promptKey], false);
+  const outputTokens = readProviderCount(fn, outputKey, record[outputKey], false);
+  const totalRaw: unknown = record.total_tokens;
+  const promptDetailsRaw: unknown = record[promptDetailsKey];
+  const outputDetailsRaw: unknown = record[outputDetailsKey];
+
+  let cachedTokens = 0;
+  if (promptDetailsRaw !== undefined && promptDetailsRaw !== null) {
+    const allowed = chat
+      ? ['cached_tokens', 'audio_tokens', 'cache_write_tokens', 'image_tokens', 'text_tokens']
+      : ['cached_tokens', 'cache_write_tokens'];
+    const details = readProviderRecord(fn, promptDetailsKey, promptDetailsRaw, allowed);
+    cachedTokens = readProviderCount(fn, `${promptDetailsKey}.cached_tokens`, details.cached_tokens, true);
+    // Cache writes have no priced bucket here: zero is fine, anything else is unknown.
+    assertZero(fn, `${promptDetailsKey}.cache_write_tokens`, details.cache_write_tokens, 'cache writes are not priced for OpenAI by this kit');
+    if (chat) {
+      assertZero(fn, `${promptDetailsKey}.audio_tokens`, details.audio_tokens, 'audio tokens are billed at different rates and are not priced by this kit');
+      assertZero(fn, `${promptDetailsKey}.image_tokens`, details.image_tokens, 'image tokens can be billed at a different rate and are not priced by this kit');
+      readProviderCount(fn, `${promptDetailsKey}.text_tokens`, details.text_tokens, true); // informational
+    }
+  }
+  if (outputDetailsRaw !== undefined && outputDetailsRaw !== null) {
+    const allowed = chat
+      ? ['reasoning_tokens', 'audio_tokens', 'accepted_prediction_tokens', 'rejected_prediction_tokens', 'text_tokens']
+      : ['reasoning_tokens'];
+    const details = readProviderRecord(fn, outputDetailsKey, outputDetailsRaw, allowed);
+    const reasoning = readProviderCount(fn, `${outputDetailsKey}.reasoning_tokens`, details.reasoning_tokens, true);
+    if (reasoning > outputTokens) {
+      throw new RangeError(`${fn}: ${outputDetailsKey}.reasoning_tokens (${reasoning}) exceeds ${outputKey} (${outputTokens})`);
+    }
+    if (chat) {
+      assertZero(fn, `${outputDetailsKey}.audio_tokens`, details.audio_tokens, 'audio tokens are billed at different rates and are not priced by this kit');
+      readProviderCount(fn, `${outputDetailsKey}.text_tokens`, details.text_tokens, true); // informational
+      readProviderCount(fn, `${outputDetailsKey}.accepted_prediction_tokens`, details.accepted_prediction_tokens, true);
+      readProviderCount(fn, `${outputDetailsKey}.rejected_prediction_tokens`, details.rejected_prediction_tokens, true);
+    }
+  }
+  if (cachedTokens > promptTokens) {
+    throw new RangeError(`${fn}: cached_tokens (${cachedTokens}) exceeds ${promptKey} (${promptTokens})`);
+  }
+  if (totalRaw !== undefined) {
+    const total = readProviderCount(fn, 'total_tokens', totalRaw, false);
+    if (total !== promptTokens + outputTokens) {
+      throw new RangeError(`${fn}: total_tokens (${total}) does not equal ${promptKey} + ${outputKey} (${promptTokens + outputTokens})`);
+    }
+  }
+  return { inputTokens: promptTokens - cachedTokens, outputTokens, cacheReadTokens: cachedTokens };
+}
+
+/** A count that must be absent or 0, because a nonzero one is billed in a way this kit does not price. */
+function assertZero(fn: string, path: string, value: unknown, why: string): void {
+  const count = readProviderCount(fn, path, value, true);
+  if (count !== 0) {
+    throw new RangeError(`${fn}: ${path} is ${count}; ${why}`);
+  }
+}
+
+/**
+ * A plain or null-prototype object whose own keys are all in `allowed`,
+ * returned as a null-prototype snapshot of its own fields (each read once), so
+ * a field on a polluted `Object.prototype` can never stand in for a missing count.
+ */
+function readProviderRecord(fn: string, path: string, value: unknown, allowed: readonly string[]): Record<string, unknown> {
+  if (!isPlainRecord(value)) {
+    throw new TypeError(`${fn}: ${path} must be a plain object`);
+  }
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key === 'symbol') {
+      throw new TypeError(`${fn}: ${path} has an unknown symbol-keyed field`);
+    }
+    if (!allowed.includes(key)) {
+      throw new TypeError(`${fn}: ${path} has unknown field ${describe(key)}; expected only ${allowed.join(', ')}`);
+    }
+  }
+  const own: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(value) as string[]) own[key] = value[key];
+  return own;
+}
+
+/** A non-negative safe integer. `undefined`, and `null` when `optional`, read as 0. */
+function readProviderCount(fn: string, path: string, value: unknown, optional: boolean): number {
+  if (optional && (value === undefined || value === null)) return 0;
+  if (typeof value !== 'number') {
+    throw new TypeError(`${fn}: ${path} must be a non-negative safe integer${optional ? ' or null' : ''}`);
+  }
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${fn}: ${path} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+// ---------------------------------------------------------------------------
+// Usage readers: known counts, or unknown with a reason
+// ---------------------------------------------------------------------------
+
+/**
+ * What {@link usageFromAnthropic} and {@link usageFromOpenAI} return: the
+ * token counts, or the fact that this response's usage cannot be told.
+ * `unknown` is never zero: settle it as `{ usage: 'unknown' }` and a
+ * reservation keeps its full estimate.
+ */
+export type UsageReading =
+  | { status: 'known'; usage: UsageTokens }
+  | { status: 'unknown'; reason: string };
+
+/** Make every count a plain non-negative number: `-0` reads as `0`. */
+function plainCounts(usage: UsageTokens): UsageTokens {
+  const out: UsageTokens = {};
+  for (const key of Object.keys(usage) as Array<keyof UsageTokens>) {
+    const count = usage[key];
+    if (count !== undefined) out[key] = count + 0;
+  }
+  return out;
+}
+
+/** A short, escaped reason from whatever was thrown; never throws itself. */
+function reasonOf(error: unknown): string {
+  try {
+    if (error instanceof Error) {
+      const message: unknown = error.message; // read once; a getter could answer differently next time
+      if (typeof message === 'string') return escapeText(message.length > 200 ? `${message.slice(0, 200)}…` : message);
+    }
+  } catch {
+    // a hostile error object: fall through to the generic reason
+  }
+  return 'usage could not be read';
+}
+
+function readUsage(parse: (usage: unknown) => UsageTokens, usage: unknown): UsageReading {
+  try {
+    return { status: 'known', usage: plainCounts(parse(usage)) };
+  } catch (error) {
+    return { status: 'unknown', reason: reasonOf(error) };
+  }
+}
+
+/** Options for {@link usageFromAnthropic}. */
+export interface AnthropicUsageOptions {
+  /**
+   * Inference regions, besides the default (`'global'`), whose price your
+   * table already covers. A response from any other region reads as unknown.
+   */
+  allowInferenceGeo?: readonly string[];
+}
+
+function readAnthropicOptions(options: unknown): readonly string[] {
+  if (options === undefined) return [];
+  if (!isPlainRecord(options)) throw new TypeError('usageFromAnthropic: options must be an object like { allowInferenceGeo: ["us"] }');
+  for (const key of Reflect.ownKeys(options)) {
+    if (key !== 'allowInferenceGeo') throw new TypeError('usageFromAnthropic: options has an unknown field; expected only allowInferenceGeo');
+  }
+  const geos: unknown = Object.hasOwn(options, 'allowInferenceGeo') ? options.allowInferenceGeo : undefined;
+  if (geos === undefined) return [];
+  if (!Array.isArray(geos) || geos.some((g) => typeof g !== 'string' || g === '')) {
+    throw new TypeError('usageFromAnthropic: allowInferenceGeo must be an array of non-empty strings');
+  }
+  return [...(geos as string[])];
+}
+
+/**
+ * Read an Anthropic Messages API `usage` block: `{ status: 'known', usage }`
+ * with the token counts, or `{ status: 'unknown', reason }`. Never throws for a
+ * malformed `usage`; only malformed `options` (static configuration) throw.
+ *
+ * - `input_tokens` and `output_tokens` are required non-negative safe
+ *   integers. A streaming `message_start` usage is NOT final (its
+ *   `output_tokens` is a placeholder): read a stream with
+ *   {@link usageFromAnthropicStream}, which wants the closing `message_delta`.
+ * - `cache_read_input_tokens` maps to `cacheReadTokens`.
+ * - Cache writes: when the `cache_creation` split is present, its
+ *   `ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens` map to the 5m
+ *   and 1h buckets, and `cache_creation_input_tokens`, if also present, must
+ *   equal their sum. When the split is absent, the whole
+ *   `cache_creation_input_tokens` total is priced as 5-minute writes (the
+ *   default TTL), never dropped.
+ * - A cache field that is **absent** (or `null`) counts as 0: older API
+ *   versions omit them when no caching was used. One that is present but
+ *   malformed makes the reading unknown.
+ * - Informational fields the SDK declares are accepted: `service_tier` (a
+ *   string; fold the tier's price into your table), `output_tokens_details`
+ *   (a breakdown inside `output_tokens`, which stays the billed total) and
+ *   `inference_geo`. `inference_geo` of `null` or `'global'` is known; another
+ *   region reads as unknown unless you list it in `options.allowInferenceGeo`
+ *   because your table prices it. `server_tool_use` is accepted only when
+ *   every count is 0, because per-request tool fees are not priced here.
+ * - Beta fields are accepted when they are null/default (`speed` of
+ *   `'standard'`, `iterations`, `fallback_credit`) and unknown when populated.
+ *
+ * The reading is `unknown` when `usage` is missing, `null` or not a plain
+ * object; `input_tokens` or `output_tokens` is missing; any count is not a
+ * non-negative safe integer (a string such as `"123"`, `NaN`, `Infinity`, a
+ * fraction, a BigInt, or above 2^53 - 1); a field this version does not know is
+ * present (it might be a new billed bucket); a cache-write total disagrees
+ * with its split; tool fees are nonzero; or a getter or Proxy trap throws.
+ * `reason` is a short escaped sentence for logs. Each field is read once, and
+ * `-0` reads as `0`.
+ */
+export function usageFromAnthropic(usage: unknown, options?: AnthropicUsageOptions): UsageReading {
+  const geos = readAnthropicOptions(options);
+  return readUsage((u) => parseAnthropicUsage(u, geos), usage);
+}
+
+/** Usage fields whose null, in a `message_delta`, means "unchanged since `message_start`". */
+const STREAM_NULLABLE_FIELDS: readonly string[] = [
+  'input_tokens',
+  'cache_creation_input_tokens',
+  'cache_read_input_tokens',
+  'cache_creation',
+  'output_tokens_details',
+  'server_tool_use',
+  'service_tier',
+  'inference_geo',
+  'speed',
+  'iterations',
+  'fallback_credit',
+];
+
+/**
+ * Read a finished Anthropic stream: the `message.usage` of the `message_start`
+ * event plus the usage of the final `message_delta` event.
+ *
+ * `message_start` carries the input side with a placeholder `output_tokens`;
+ * `message_delta` carries the cumulative totals. A stream that ended before a
+ * `message_delta` arrived (a client abort, a dropped connection) has no final
+ * usage, so the reading is `unknown` with a reason naming `message_delta`, and
+ * a reservation keeps its full estimate. A `message_delta` whose
+ * `output_tokens` is not a number is not final either.
+ *
+ * Merge rule: for `input_tokens`, the cache counts, `output_tokens_details`
+ * and `server_tool_use`, the delta's value wins when it is not null; otherwise
+ * the start's value is kept. `output_tokens` always comes from the delta. The
+ * `cache_creation` split, `service_tier` and `inference_geo` come from the
+ * start. The merged usage is then read exactly like {@link usageFromAnthropic}
+ * (so a delta total that disagrees with the start's cache split is unknown).
+ * Never throws for malformed events.
+ */
+export function usageFromAnthropicStream(start: unknown, delta: unknown, options?: AnthropicUsageOptions): UsageReading {
+  const geos = readAnthropicOptions(options);
+  return readUsage((): UsageTokens => {
+    if (delta === undefined || delta === null) {
+      throw new Error('usageFromAnthropicStream: no message_delta usage was seen, so the stream did not finish with final counts');
+    }
+    if (!isPlainRecord(start) || !isPlainRecord(delta)) {
+      throw new TypeError('usageFromAnthropicStream: the message_start and message_delta usage must be plain objects');
+    }
+    // Read every field of both events exactly once.
+    const merged: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of Reflect.ownKeys(start)) {
+      if (typeof key === 'symbol') throw new TypeError('usageFromAnthropicStream: message_start usage has a symbol key');
+      merged[key] = start[key];
+    }
+    const deltaKeys = Reflect.ownKeys(delta);
+    const deltaValues = new Map<string, unknown>();
+    for (const key of deltaKeys) {
+      if (typeof key === 'symbol') throw new TypeError('usageFromAnthropicStream: message_delta usage has a symbol key');
+      deltaValues.set(key, delta[key]);
+    }
+    const deltaOutput = deltaValues.get('output_tokens');
+    if (typeof deltaOutput !== 'number') {
+      throw new Error('usageFromAnthropicStream: the message_delta usage has no numeric output_tokens, so it is not the final message_delta');
+    }
+    merged.output_tokens = deltaOutput;
+    for (const [key, value] of deltaValues) {
+      if (key === 'output_tokens') continue;
+      // For the fields the delta may carry, a null means "no change": the start's
+      // value stays. Any other field is kept exactly as sent, even null, so that
+      // the strict read below refuses a field this version does not know.
+      if ((value === null || value === undefined) && STREAM_NULLABLE_FIELDS.includes(key)) continue;
+      merged[key] = value;
+    }
+    return parseAnthropicUsage(merged, geos);
+  }, undefined);
+}
+
+/**
+ * Read an OpenAI `usage` object (Chat Completions or Responses shape):
+ * `{ status: 'known', usage }` or `{ status: 'unknown', reason }`. Never
+ * throws. Cached prompt tokens become `cacheReadTokens` and are subtracted
+ * from `inputTokens`. `cache_write_tokens` of 0 is accepted and a nonzero one
+ * is unknown (there is no priced OpenAI cache-write bucket); the same goes for
+ * audio and image tokens. `text_tokens` and `reasoning_tokens` are informational
+ * parts of the totals. A Chat Completions shape and a Responses shape mixed
+ * together, cached tokens above the prompt total, a `total_tokens` that does
+ * not add up and every other case that {@link usageFromAnthropic} lists are
+ * `unknown`. A response with no `usage` at all is `unknown`, never zero. For an
+ * embeddings response use {@link usageFromOpenAIEmbeddings}.
+ */
+export function usageFromOpenAI(usage: unknown): UsageReading {
+  return readUsage(parseOpenAIUsage, usage);
+}
+
+/**
+ * Read the `usage` of an OpenAI embeddings response, `{ prompt_tokens,
+ * total_tokens }`, as an input-only reading. It is a separate function because
+ * a chat or Responses usage that lacks its output count must stay unknown;
+ * only you know that this call was an embeddings call. `total_tokens`, when
+ * present, must equal `prompt_tokens`; any other field is unknown.
+ */
+export function usageFromOpenAIEmbeddings(usage: unknown): UsageReading {
+  return readUsage((u): UsageTokens => {
+    const fn = 'usageFromOpenAIEmbeddings';
+    const record = readProviderRecord(fn, 'usage', u, ['prompt_tokens', 'total_tokens']);
+    const promptTokens = readProviderCount(fn, 'prompt_tokens', record.prompt_tokens, false);
+    const totalRaw: unknown = record.total_tokens;
+    if (totalRaw !== undefined && readProviderCount(fn, 'total_tokens', totalRaw, false) !== promptTokens) {
+      throw new RangeError(`${fn}: total_tokens does not equal prompt_tokens`);
+    }
+    return { inputTokens: promptTokens };
+  }, usage);
+}
+
+// ---------------------------------------------------------------------------
+// Dated pricing tables
+// ---------------------------------------------------------------------------
+
+const DATE_ONLY = /^(\d{4})-(\d{2})-(\d{2})$/;
+// provider: lowercase letters, digits, '-' or '_'; model: no whitespace (it may contain ':', as some Bedrock ids do).
+const PRICING_KEY = /^[a-z0-9][a-z0-9_-]*:\S+$/;
+const DAY_MS = 86_400_000;
+
+/**
+ * Validate and freeze a dated pricing table. This kit ships no prices: you
+ * supply them, with the date you checked them and where you read them.
+ *
+ * Each entry is `{ inputPerMTokMicros, outputPerMTokMicros,
+ * cacheWritePerMTokMicros?, cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?,
+ * longContext? }`: every price a non-negative safe integer of micro-dollars per
+ * million tokens (a value above 2^53 - 1 is rejected and a BigInt is not
+ * accepted). Look prices up with {@link priceFor} and cost usage with
+ * {@link estimateCostMicros}.
+ *
+ * Any other key in an entry (a typo like `cacheWritePerMillion`) throws. Keys
+ * must look like `provider:model` with a lowercase provider. The result is
+ * frozen all the way down, with a null-prototype `rates` record, so editing
+ * your input afterward changes nothing. A `-0` price reads as 0. Each entry is
+ * read once. Pure: no clock is read here; check age with
+ * {@link assertPricingFresh}.
+ *
+ * @throws TypeError for a wrong type or shape, RangeError for a bad date,
+ *   blank source, empty table, malformed key or invalid price.
+ */
+export function definePricingTable(definition: PricingTableDefinition): DatedPricingTable {
+  const fn = 'definePricingTable';
+  if (!isPlainRecord(definition)) {
+    throw new TypeError(`${fn}: definition must be a plain object with checkedAt, source and rates`);
+  }
+  const checkedAt: unknown = definition.checkedAt;
+  const source: unknown = definition.source;
+  const rawRates: unknown = definition.rates;
+  readCheckedAt(fn, checkedAt);
+  if (typeof source !== 'string') {
+    throw new TypeError(`${fn}: source must be a non-blank string`);
+  }
+  if (isBlank(source)) {
+    throw new RangeError(`${fn}: source must be a non-blank string`);
+  }
+  if (!isPlainRecord(rawRates)) {
+    throw new TypeError(`${fn}: rates must be a plain object keyed by provider:model`);
+  }
+  const keys = Reflect.ownKeys(rawRates);
+  if (keys.length === 0) {
+    throw new RangeError(`${fn}: rates must have at least one entry`);
+  }
+  // Validate every key, then read every entry exactly once.
+  const entries: Array<readonly [string, unknown]> = [];
+  for (const key of keys) {
+    if (typeof key === 'symbol') {
+      throw new TypeError(`${fn}: rates has a symbol key; keys must be provider:model strings`);
+    }
+    if (!PRICING_KEY.test(key) || escapeText(key) !== key) {
+      throw new RangeError(`${fn}: rates key ${describe(key)} must look like provider:model (lowercase provider, no spaces)`);
+    }
+    entries.push([key, rawRates[key]]);
+  }
+  return Object.freeze({ checkedAt: checkedAt as string, source, rates: buildMicrosRates(fn, entries) });
+}
+
+/** Options for {@link assertPricingFresh}. */
+export interface PricingFreshnessOptions {
+  /** The current time, from your clock. Never read here. */
+  now: Date;
+  /** The oldest acceptable table, in days. A finite number > 0. */
+  maxAgeDays: number;
+}
+
+/**
+ * Throw unless `table` was checked within the last `maxAgeDays` days of
+ * `now`. Call it at startup or per request, with a `now` from your clock.
+ * The options object's two fields are each read once, and any other key is
+ * rejected.
+ *
+ * A table that is exactly `maxAgeDays` old passes; one millisecond older
+ * fails. A `checkedAt` up to one day in the future is allowed (a date written
+ * in a time zone ahead of UTC); further in the future throws.
+ *
+ * @throws TypeError or RangeError for a malformed table or options, an invalid
+ *   `now`, or a `maxAgeDays` that is not a finite number > 0; RangeError for a
+ *   `checkedAt` more than a day in the future; Error when the table is older
+ *   than `maxAgeDays` (the message names its date, age and source).
+ */
+export function assertPricingFresh(table: DatedPricingTable, options: PricingFreshnessOptions): void {
+  const fn = 'assertPricingFresh';
+  if (!isPlainRecord(table)) {
+    throw new TypeError(`${fn}: table must come from definePricingTable`);
+  }
+  const checkedAt: unknown = table.checkedAt;
+  const source: unknown = table.source;
+  const checkedMs = readCheckedAt(fn, checkedAt);
+  if (!isPlainRecord(options)) {
+    throw new TypeError(`${fn}: options must be { now, maxAgeDays }`);
+  }
+  for (const key of Reflect.ownKeys(options)) {
+    if (key !== 'now' && key !== 'maxAgeDays') {
+      throw new TypeError(`${fn}: options must have only now and maxAgeDays`);
+    }
+  }
+  const now: unknown = Object.hasOwn(options, 'now') ? options.now : undefined;
+  const maxAgeDays: unknown = Object.hasOwn(options, 'maxAgeDays') ? options.maxAgeDays : undefined;
+  let nowMs: number;
+  try {
+    nowMs = Date.prototype.getTime.call(now);
+  } catch {
+    throw new TypeError(`${fn}: now must be a Date`);
+  }
+  if (!Number.isFinite(nowMs)) {
+    throw new RangeError(`${fn}: now must be a valid Date`);
+  }
+  if (typeof maxAgeDays !== 'number') {
+    throw new TypeError(`${fn}: maxAgeDays must be a finite number > 0`);
+  }
+  if (!Number.isFinite(maxAgeDays) || maxAgeDays <= 0) {
+    throw new RangeError(`${fn}: maxAgeDays must be a finite number > 0`);
+  }
+  const ageMs = nowMs - checkedMs;
+  if (ageMs < -DAY_MS) {
+    throw new RangeError(`${fn}: checkedAt ${describe(checkedAt)} is in the future; fix the date`);
+  }
+  if (ageMs > maxAgeDays * DAY_MS) {
+    const ageDays = Math.floor(ageMs / DAY_MS);
+    throw new Error(
+      `cost-governor-kit: pricing table checked ${describe(checkedAt)} is ${ageDays} days old ` +
+        `(limit ${maxAgeDays}); re-check the prices at ${typeof source === 'string' ? describe(source) : 'their source'} ` +
+        'and update checkedAt.',
+    );
+  }
+}
+
+/** Parse a `checkedAt` (date-only or zoned instant) to epoch ms, or throw. */
+function readCheckedAt(fn: string, checkedAt: unknown): number {
+  if (typeof checkedAt !== 'string') {
+    throw new TypeError(`${fn}: checkedAt must be a YYYY-MM-DD date or an ISO-8601 date-time with a zone`);
+  }
+  const dateOnly = DATE_ONLY.exec(checkedAt);
+  const ms = dateOnly ? parseIsoInstant(`${checkedAt}T00:00:00Z`) : parseIsoInstant(checkedAt);
+  if (ms === undefined) {
+    throw new RangeError(
+      `${fn}: checkedAt ${describe(checkedAt)} must be a real YYYY-MM-DD date or an ISO-8601 date-time with a zone`,
+    );
+  }
+  return ms;
 }

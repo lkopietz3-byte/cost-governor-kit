@@ -8,9 +8,10 @@ import * as root from 'cost-governor-kit';
 import * as pricing from 'cost-governor-kit/pricing';
 import * as ceiling from 'cost-governor-kit/preCallCeiling';
 import * as reserve from 'cost-governor-kit/reserveConfirm';
+import * as admission from 'cost-governor-kit/admission';
 
 // Subpaths re-export the same functions as the root entry.
-for (const [name, fn] of Object.entries({ ...pricing, ...ceiling, ...reserve })) {
+for (const [name, fn] of Object.entries({ ...pricing, ...ceiling, ...reserve, ...admission })) {
   assert.equal(root[name], fn, `root export ${name} differs from its subpath export`);
 }
 
@@ -58,9 +59,10 @@ assert.throws(() => getRatesOrThrow({ 'toy-model': rates }, 'constructor'), /no 
 const atCeiling = checkPreCallCeiling({
   rates, spentSoFarUsd: 4, ceilingUsd: 7, estimatedNextCallUsage: { inputTokens: 1_000_000 },
 });
-assert.deepEqual(atCeiling, {
-  allowed: true, projectedNextCallCostUsd: 3, projectedTotalUsd: 7, ceilingUsd: 7, reason: undefined,
+assert.deepStrictEqual(atCeiling, {
+  allowed: true, projectedNextCallCostUsd: 3, projectedTotalUsd: 7, ceilingUsd: 7,
 });
+assert.equal(Object.hasOwn(atCeiling, 'reason'), false);
 const denied = checkPreCallCeiling({
   rates, spentSoFarUsd: 0, ceilingUsd: 0, estimatedNextCallUsage: { inputTokens: 1_000_000 },
 });
@@ -148,5 +150,96 @@ for (const rejection of [undefined, null, false, 0, '']) {
   assert.equal(outcome.commitError, rejection);
 }
 assert.equal(Object.hasOwn(await withReserveConfirm(ledger, 'fresh', 1, async () => 'ok'), 'commitError'), false);
+
+// Admission: all or nothing across scopes, fail closed, HTTP mapping.
+{
+  const { admitBeforeCall, admissionHttpStatus, createInMemoryAdmissionStore, DEFAULT_ADMISSION_TIMEOUT_MS } = root;
+  assert.equal(DEFAULT_ADMISSION_TIMEOUT_MS, 5_000);
+  const store = createInMemoryAdmissionStore({ now: () => new Date('2026-10-10T12:00:00Z') });
+  const scopes = [{ key: 'probe:global', limit: 3 }, { key: 'probe:user:a', limit: 1 }];
+  assert.deepEqual(await admitBeforeCall(store, { scopes }), { status: 'admitted', windowId: '2026-10-10' });
+  const limited = await admitBeforeCall(store, { scopes });
+  assert.deepEqual(limited, { status: 'limited', scopeKey: 'probe:user:a', windowId: '2026-10-10' });
+  assert.equal(admissionHttpStatus(limited, { perUserScopePrefixes: ['probe:user:'] }), 429);
+  assert.equal(admissionHttpStatus({ status: 'limited', scopeKey: 'probe:global', windowId: '2026-10-10' }), 503);
+  assert.equal(admissionHttpStatus({ status: 'admitted', windowId: '2026-10-10' }), null);
+  // The global scope was not counted by the limited attempt: two more users fit.
+  assert.equal((await admitBeforeCall(store, { scopes: [scopes[0], { key: 'probe:user:b', limit: 1 }] })).status, 'admitted');
+  assert.equal((await admitBeforeCall(store, { scopes: [scopes[0], { key: 'probe:user:c', limit: 1 }] })).status, 'admitted');
+  assert.equal((await admitBeforeCall(store, { scopes: [scopes[0], { key: 'probe:user:d', limit: 1 }] })).status, 'limited');
+  // Fail closed: throw, malformed reply, bad request. Never rejects.
+  let calls = 0;
+  const throwing = { admit: async () => { calls++; throw new Error('db down'); } };
+  assert.equal((await admitBeforeCall(throwing, { scopes })).reason, 'store_error');
+  assert.equal(calls, 1);
+  const bare = { admit: async () => true };
+  assert.equal((await admitBeforeCall(bare, { scopes })).reason, 'malformed_reply');
+  const dup = await admitBeforeCall(store, { scopes: [scopes[0], scopes[0]] });
+  assert.equal(dup.reason, 'invalid_request');
+  assert.ok(dup.cause instanceof RangeError);
+  const concurrent = createInMemoryAdmissionStore();
+  const many = await Promise.all(Array.from({ length: 50 }, () => admitBeforeCall(concurrent, { scopes: [{ key: 'k', limit: 10 }] })));
+  assert.equal(many.filter((o) => o.status === 'admitted').length, 10);
+}
+
+// Commit once, micros, mappers, dated tables, amount reservations.
+{
+  const {
+    createCommitOnce, estimateCostMicros, usageFromAnthropic, usageFromAnthropicStream, usageFromOpenAI,
+    definePricingTable, assertPricingFresh, priceFor,
+  } = root;
+  let runs = 0;
+  const once = createCommitOnce(async () => { runs++; return 'counted'; });
+  assert.deepEqual(await Promise.all([once(), once(), once()]), ['counted', 'counted', 'counted']);
+  assert.equal(runs, 1);
+  assert.equal(once.state, 'committed');
+
+  const price = { inputPerMTokMicros: 3_000_000, outputPerMTokMicros: 15_000_000, cacheReadPerMTokMicros: 300_000, cacheWritePerMTokMicros: 3_750_000 };
+  assert.equal(estimateCostMicros({ inputTokens: 1_200, outputTokens: 400, cacheReadTokens: 8_000, cacheCreation5mTokens: 2_000 }, price), 19_500);
+  assert.equal(estimateCostMicros({ inputTokens: 1 }, { inputPerMTokMicros: 100_000, outputPerMTokMicros: 0 }), 1);
+
+  assert.deepEqual(usageFromAnthropic({ input_tokens: 10, output_tokens: 5, cache_creation_input_tokens: 100 }), {
+    status: 'known',
+    usage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreation5mTokens: 100, cacheCreation1hTokens: 0 },
+  });
+  assert.equal(usageFromAnthropic({ input_tokens: 1, output_tokens: 1, surprise: 1 }).status, 'unknown');
+  assert.equal(usageFromOpenAI(undefined).status, 'unknown');
+  assert.deepEqual(usageFromOpenAI({ prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: { cached_tokens: 40 } }), {
+    status: 'known',
+    usage: { inputTokens: 60, outputTokens: 5, cacheReadTokens: 40 },
+  });
+
+  const table = definePricingTable({
+    checkedAt: '2026-10-01', source: 'synthetic',
+    rates: { 'toy:model': price },
+  });
+  assert.deepEqual(priceFor(table, 'toy:model'), { status: 'found', key: 'toy:model', price });
+  assert.deepEqual(priceFor(table, 'toy:other'), { status: 'unknown-model', key: 'toy:other' });
+  assertPricingFresh(table, { now: new Date('2026-10-10T00:00:00Z'), maxAgeDays: 30 });
+  assert.throws(() => assertPricingFresh(table, { now: new Date('2027-01-01T00:00:00Z'), maxAgeDays: 30 }), /days old/);
+
+  const mem = root.createInMemoryCapacityLedger();
+  const scoped = await root.withCapacityReservations(
+    mem,
+    { scopes: [{ key: 'u', limit: 100 }, { key: 'g', limit: 100 }], operationId: 'op', amount: 40 },
+    async () => ({ status: 'succeeded', value: 1, settle: { actualAmount: 25 } }),
+  );
+  assert.equal(scoped.status, 'confirmed');
+  assert.deepEqual([mem.usage('u').confirmed, mem.usage('g').confirmed], [25, 25]);
+  assert.equal(usageFromAnthropicStream({ input_tokens: 1, output_tokens: 1 }, undefined).status, 'unknown');
+  assert.equal(root.usageFromOpenAIEmbeddings({ prompt_tokens: 3, total_tokens: 3 }).status, 'known');
+
+  const settled = [];
+  const amountResult = await withCapacityReservation({
+    reserveCapacity: async (request) => ({
+      status: 'acquired',
+      reservation: { id: 'r', key: request.key, operationId: request.operationId, expiresAt: new Date(Date.now() + 60_000).toISOString() },
+    }),
+    confirmReservation: async (_reservation, settlement) => { settled.push(settlement); },
+    releaseReservation: async () => {},
+  }, { key: 'budget', limit: 1_000_000, operationId: 'op', amount: 500 }, async () => ({ status: 'succeeded', value: 1, settle: { usage: 'unknown' } }));
+  assert.equal(amountResult.status, 'confirmed');
+  assert.deepEqual(settled, [{ usage: 'unknown', amount: 500, reservedAmount: 500 }]);
+}
 
 console.log('consumer-probe: ok');

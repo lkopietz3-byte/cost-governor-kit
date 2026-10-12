@@ -29,4 +29,9 @@ const denied = root.checkPreCallCeiling({
 });
 assert.equal(denied.allowed, false);
 
+const admission = require('cost-governor-kit/admission');
+assert.equal(root.admitBeforeCall, admission.admitBeforeCall, 'require()d root and admission subpath should share the same module');
+assert.equal(root.admissionHttpStatus({ status: 'unavailable', reason: 'timeout' }), 503);
+assert.equal(root.estimateCostMicros({ inputTokens: 1 }, { inputPerMTokMicros: 3_000_000, outputPerMTokMicros: 0 }), 3);
+
 console.log('consumer-probe.cjs: require() works');

@@ -1,6 +1,6 @@
 {
   "name": "cost-governor-kit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates, and reserve/confirm usage-counting helpers whose limits are enforced by your own storage adapter.",
   "keywords": [
     "llm",
@@ -50,6 +50,11 @@
       "types": "./dist/reserveConfirm.d.ts",
       "import": "./dist/reserveConfirm.js",
       "default": "./dist/reserveConfirm.js"
+    },
+    "./admission": {
+      "types": "./dist/admission.d.ts",
+      "import": "./dist/admission.js",
+      "default": "./dist/admission.js"
     }
   },
   "typesVersions": {
@@ -62,6 +67,9 @@
       ],
       "reserveConfirm": [
         "./dist/reserveConfirm.d.ts"
+      ],
+      "admission": [
+        "./dist/admission.d.ts"
       ]
     }
   },
@@ -79,7 +87,7 @@
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:postgres": "vitest run src/referenceImplPostgres.test.ts",
+    "test:postgres": "vitest run --no-file-parallelism src/referenceImplPostgres.test.ts src/capacityLedgerPostgres.test.ts",
     "typecheck": "tsc --noEmit",
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
     "verify:package": "node scripts/verify-package.mjs",

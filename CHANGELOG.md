@@ -4,6 +4,185 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.3.0] - unreleased
+
+Minor release. The exports are all additive: every 0.2.1 export is still there
+with the same name and signature. A few inputs that were accepted now throw, and
+three results changed, so read the list below before upgrading.
+
+### Breaking changes
+
+- **`expiresAt` must carry a time zone.** `withCapacityReservation` used to read
+  a zone-less `expiresAt` as the server's local time; it now throws a
+  `RangeError` for anything that is not a strict ISO-8601 date-time ending in
+  `Z` or `+hh:mm` / `-hh:mm`. Also rejected: non-ISO text (`"2099"`,
+  `"Dec 25, 2099"`), impossible dates (`02-30`, `T24:00`), a space instead of
+  `T`, lowercase `t` or `z`, an offset without a colon (`+0000`) or with hours
+  only (`+00`), and more than nine fractional digits. Migration: format the
+  value in the adapter before returning it, for example
+  `new Date(row.expires_at).toISOString()`; raw Postgres text such as
+  `2026-10-10 16:17:14.411+00` must be converted. Fractional seconds past
+  milliseconds are truncated.
+- **`request.amount` is now read.** A `withCapacityReservation` request that
+  carries an `amount` which is not a safe integer >= 1 (for example `null` or a
+  string) now throws before the adapter is called; before, the field was
+  ignored. Migration: remove the field, or rename it, if it was unrelated to
+  micro-dollar holds.
+- **`checkPreCallCeiling` omits `reason` when allowed.** The key used to be
+  present with the value `undefined`. This changes `Object.hasOwn`,
+  `Object.keys` and strict-equality checks on the result. Migration: branch on
+  `allowed`, and read `reason` only when it is false.
+- **A throwing work-outcome getter no longer throws.** If the outcome that
+  `doTheWork` returned has a getter or Proxy trap that throws, the result is
+  now `work_outcome_ambiguous` with the hold kept, where the error used to
+  escape after the paid work ran. Migration: handle that result status (you
+  already needed to for other unreadable outcomes); a surrounding `catch` no
+  longer sees this case.
+
+### Added
+
+- **Multi-scope admission control** (new subpath `cost-governor-kit/admission`,
+  also on the root): `admitBeforeCall(store, { scopes, window?, timeoutMs? })`
+  counts one attempt against every scope before a paid call, all or nothing,
+  through an `AdmissionStore` you write. It never throws, never retries and
+  never refunds: a store throw, a timeout (default 5,000 ms), a malformed reply
+  (wrong status, a missing or non-canonical `windowId`, a `scopeKey` that was
+  not requested, an admit past a zero limit) and a malformed request (blank or
+  duplicate keys, bad limits, no scopes) all resolve to
+  `{ status: 'unavailable', reason }`. `admissionHttpStatus(outcome, opts?)`
+  maps a well-formed admitted outcome (a canonical `windowId`, no `scopeKey`)
+  to `null` and anything malformed to 503, limited on a per-user scope to 429, and limited on a
+  global scope or unavailable to 503. A reply that arrives after the
+  deadline (measured before the store is called, so event-loop blocking counts)
+  is a timeout even if it says admitted; the scopes array's `length` is read
+  once. `createInMemoryAdmissionStore({ now? })`
+  is a single-process reference store for unit tests only; it does not hold a
+  cap across instances. Also exports `DEFAULT_ADMISSION_TIMEOUT_MS` and the
+  `AdmissionScope`, `AdmissionWindow`, `AdmissionRequest`, `AdmissionDecision`,
+  `AdmissionStore`, `AdmitOutcome`, `AdmissionUnavailableReason`,
+  `AdmitBeforeCallRequest`, `AdmissionHttpStatusOptions` and
+  `InMemoryAdmissionStoreOptions` types.
+- README: "Admission control (the pattern most apps need)", with store recipes
+  for Postgres (a `security definer` function owned by the migration role, so
+  the server role needs only `EXECUTE`; tested on PGlite by
+  `src/admissionRecipePglite.test.ts`, one connection, including an ordinary
+  non-owner role without `BYPASSRLS`), Cloudflare D1 (`db.batch()` with a `CHECK` constraint; batch
+  rollback is Reported from Cloudflare's docs) and Redis/Upstash (one Lua
+  `EVAL`; not run). Each is a recipe the app owns and tests.
+- **Integer micro-dollar reservations:** an optional `amount` on
+  `ReserveCapacityRequest`; a succeeded work outcome may carry
+  `settle: { actualAmount } | { usage: 'unknown' }`, and `confirmReservation`
+  then receives a `CapacitySettlement` (`usage`, `amount`, `reservedAmount`).
+  Unknown usage keeps the full estimate; a reported `-0` is recorded as `0`.
+  Without `amount`, behavior is unchanged. New types `CapacitySettlement`, `CapacitySettle`.
+- `createCommitOnce(fn)`: runs a commit at most once under concurrent and
+  repeated calls, for counting a stream on its first visible output. A failure
+  is surfaced to every caller and is final for that instance. New types
+  `CommitOnce`, `CommitOnceState`.
+- The observatory example vendors the new `admission` module too.
+- **Dated integer-micro price tables.** `definePricingTable({ checkedAt, source,
+  rates })` takes entries `{ inputPerMTokMicros, outputPerMTokMicros,
+  cacheWritePerMTokMicros?, cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?,
+  longContext? }` keyed `provider:model` (safe integers; the kit ships no
+  prices) and returns a deeply frozen table. `priceFor(table, key)` returns
+  `{ status: 'found', key, price }` or `{ status: 'unknown-model', key? }`, with no
+  fallback price. `assertPricingFresh(table, { now, maxAgeDays })` takes `now`
+  from the caller. New types `DatedPricingTable`, `PricingTableDefinition`,
+  `MicrosPrice`, `MicrosRates`, `LongContextRates`, `PriceLookup`,
+  `PricingFreshnessOptions`.
+- `estimateCostMicros(usage, price)`: exact BigInt arithmetic in whole
+  micro-dollars, rounded up once on the sum, with cache-read, 5-minute and
+  1-hour write prices and long-context prices; a bucket with tokens and no
+  price throws, and any positive cost is at least 1.
+- `usageFromAnthropic(usage)` and `usageFromOpenAI(usage)`: provider usage JSON
+  to `{ status: 'known', usage }` (token counts) or `{ status: 'unknown', reason }`.
+  They never throw. Missing usage, a string or non-finite count, a field the kit
+  does not know, a hostile getter or Proxy and similar all read as unknown, which
+  settles as `{ usage: 'unknown' }` and keeps the reserved estimate (never zero).
+  A cache field that is absent counts as 0; one that is present and malformed is
+  unknown. Fields the official SDK declares as informational or null/default
+  (`output_tokens_details`, `inference_geo` of null or `'global'`, OpenAI
+  `cache_write_tokens` of 0, `text_tokens`) do not make a reading unknown.
+  `usageFromAnthropic` prices `cache_creation_input_tokens` as 5-minute writes
+  when the `cache_creation` split is absent. New type `UsageReading`.
+- `overrunAmount` on the `confirmed` and `confirmation_failed` results of an
+  amount reservation, present only when the reported actual exceeded the hold.
+  The actual amount is still recorded in full.
+- `createCommitOnce(fn).attempt()`: shares the single run, never rejects and
+  returns `{ ran, status: 'committed', value }` or `{ ran, status: 'failed',
+  error }`. New type `CommitOnceResult`.
+- `withCapacityReservations(ledger, { scopes, operationId, amount }, doTheWork)`:
+  reserve the same amount on 1 to 8 scopes (a per-user dollar cap inside a global
+  one), run paid work once, and settle every scope. Resolves to `confirmed`
+  (with `overrunAmount` when the actual passed the hold), `refused` (naming the
+  scope; earlier holds released), `released_after_failure`, or
+  `needs_reconciliation` (naming the scope; holds kept). New types
+  `ReservationScope`, `ReserveScopesRequest`, `CapacityReservationsResult`.
+- `createInMemoryCapacityLedger({ holdMs?, now? })`: a single-process
+  `CapacityReservationLedger` for unit tests, with `usage(key)`.
+- README: a worked path for daily dollar caps per user and global (call caps,
+  `priceFor`, `estimateCostMicros`, `withCapacityReservations`, streaming with
+  `createCommitOnce`), and a Postgres capacity-ledger recipe with a `utc-day` or
+  `utc-month` window the database resolves. `src/capacityLedgerRecipePglite.test.ts`
+  runs the README's SQL, adapter and both route examples; the opt-in
+  `src/capacityLedgerPostgres.test.ts` (`npm run test:postgres`) fires 50
+  concurrent connections at a real Postgres.
+- `usageFromAnthropicStream(start, delta)`: merges a stream's `message_start`
+  and final `message_delta` usage; unknown when no `message_delta` arrived.
+  `usageFromOpenAIEmbeddings(usage)`: an input-only reading for embeddings.
+  `usageFromAnthropic(usage, { allowInferenceGeo })` option and the type
+  `AnthropicUsageOptions`.
+- `checkPreCallCeiling({ ..., requireOutputTokens: true })` throws when
+  `outputTokens` is missing instead of pricing it at $0. Off by default.
+- README opening rewritten around the one job (fail-closed admission and spend
+  caps on a database you already run), with a start-here map and a list of what
+  the kit cannot see (keys built from unset ids, month windows, tiers, weights,
+  store clocks).
+- README: dated price tables, `estimateCostMicros` and the usage readers, with
+  illustrative, dated example prices.
+
+### Fixed
+
+- **`expiresAt` is no longer read as local time.** The old `Date.parse` read a
+  zone-less `2026-10-10T16:17:14.411` in the server's time zone, so an expired
+  hold could be accepted or a live one rejected, and it rolled impossible dates
+  forward (`02-30` became `03-02`). See Breaking changes.
+- **A throwing work-outcome getter no longer loses the reservation.** Reading
+  the outcome ran outside the protective `try`. See Breaking changes.
+- **`checkPreCallCeiling` omits `reason` when allowed** (see Breaking changes).
+- **The ceiling denial message no longer contradicts itself.** A ceiling that is
+  not a whole number of micro-dollars is printed with the extra digits needed to
+  read below the projected total (`$4.9999996`, not `$5.000000`). Whole
+  micro-dollar ceilings print exactly as before.
+- **The usage readers read own properties only.** A token count placed on a
+  polluted `Object.prototype` could stand in for a missing `output_tokens` or
+  `prompt_tokens` and turn an `unknown` reading into a known, too-low one. The
+  provider usage readers now copy a record's own fields before reading.
+- **README usage-mapping snippet** priced `cache_creation_input_tokens` at $0
+  when the `cache_creation` TTL split was absent. It now prices the total as
+  5-minute writes in that case. The README snippet is run by a test.
+
+### Changed
+
+- `npm run test:postgres` now runs both Postgres suites, one file at a time.
+- CI runs `npm run test:postgres` in a new `postgres` job against a
+  `postgres:17` service container and fails if that suite reports any skipped
+  test.
+- Tests: `test/verdict-table.test.ts` is a named table of verdicts, and
+  `tsconfig.json` now type-checks `test/`. The build still emits only `src/`.
+- The observatory example's vendored SDK copy is regenerated for the new source.
+
+### Documented
+
+- Always pass `outputTokens`, set to the request's `max_tokens` bound, in a
+  ceiling check. An omitted bucket is priced at $0.
+- A call under half a micro-dollar prices at $0, so a running total built from
+  per-call estimates never grows from such calls. Reconcile from the provider's
+  reported usage, or sum token counts and price the sum once.
+- `expiresAt` must carry a time zone.
+
 ## [0.2.1] - 2026-10-07
 
 No change to the library's behavior or API.
@@ -178,14 +357,14 @@ First release.
   a PGlite test proves a role with no grant is denied and `service_role` is
   allowed.
 - CommonJS `require("cost-governor-kit")` works alongside `import`, on Node
-  20.19+/22.12+ (`require(esm)` support) — `exports` adds a `default`
+  20.19+/22.12+ (`require(esm)` support); `exports` adds a `default`
   condition next to `import` for every entry point.
 - Every input-validation failure in `pricing.ts`, `preCallCeiling.ts` and
   `reserveConfirm.ts` throws a `TypeError` (wrong type or shape) or a
   `RangeError` (right type, bad value) instead of a plain `Error`, matching
   the sibling kits. Plain `Error` remains only for the internal "result
   overflowed to non-finite" safety net and `getRatesOrThrow`'s
-  unconfigured-model lookup — neither is malformed input.
+  unconfigured-model lookup, neither of which is malformed input.
 - README's Quickstart now imports from the package root
   (`from 'cost-governor-kit'`) as the primary example; the per-module
   subpaths (`/pricing`, `/preCallCeiling`, `/reserveConfirm`) remain

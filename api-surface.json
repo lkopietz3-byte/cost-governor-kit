@@ -3,26 +3,57 @@
     "CACHE_CREATION_1H_MULTIPLIER",
     "CACHE_CREATION_5M_MULTIPLIER",
     "CACHE_READ_MULTIPLIER",
+    "DEFAULT_ADMISSION_TIMEOUT_MS",
+    "admissionHttpStatus",
+    "admitBeforeCall",
+    "assertPricingFresh",
     "checkPreCallCeiling",
+    "createCommitOnce",
+    "createInMemoryAdmissionStore",
+    "createInMemoryCapacityLedger",
+    "definePricingTable",
+    "estimateCostMicros",
     "estimateCostUsd",
     "formatRatesForLog",
     "getRatesOrThrow",
+    "priceFor",
+    "usageFromAnthropic",
+    "usageFromAnthropicStream",
+    "usageFromOpenAI",
+    "usageFromOpenAIEmbeddings",
     "withCapacityReservation",
+    "withCapacityReservations",
     "withReserveConfirm"
   ],
   "cost-governor-kit/pricing": [
     "CACHE_CREATION_1H_MULTIPLIER",
     "CACHE_CREATION_5M_MULTIPLIER",
     "CACHE_READ_MULTIPLIER",
+    "assertPricingFresh",
+    "definePricingTable",
+    "estimateCostMicros",
     "estimateCostUsd",
     "formatRatesForLog",
-    "getRatesOrThrow"
+    "getRatesOrThrow",
+    "priceFor",
+    "usageFromAnthropic",
+    "usageFromAnthropicStream",
+    "usageFromOpenAI",
+    "usageFromOpenAIEmbeddings"
   ],
   "cost-governor-kit/preCallCeiling": [
     "checkPreCallCeiling"
   ],
   "cost-governor-kit/reserveConfirm": [
+    "createCommitOnce",
     "withCapacityReservation",
+    "withCapacityReservations",
     "withReserveConfirm"
+  ],
+  "cost-governor-kit/admission": [
+    "DEFAULT_ADMISSION_TIMEOUT_MS",
+    "admissionHttpStatus",
+    "admitBeforeCall",
+    "createInMemoryAdmissionStore"
   ]
 }

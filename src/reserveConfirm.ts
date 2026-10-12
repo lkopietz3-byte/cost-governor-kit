@@ -42,7 +42,7 @@
  * advisory `UsageLedger` only; this kit ships no `CapacityReservationLedger`.
  */
 
-import { describe, isBlank, isPlainRecord } from './internal.js';
+import { describe, isBlank, isPlainRecord, parseIsoInstant } from './internal.js';
 
 /**
  * Storage contract for the advisory {@link withReserveConfirm} helper. `key`
@@ -183,9 +183,13 @@ export interface CapacityReservation {
   /** Stable idempotency key for one logical upstream operation. */
   operationId: string;
   /**
-   * Expiry chosen by the adapter; must parse with `Date.parse`. For a newly
-   * acquired hold it must also be later than this process's `Date.now()`, so
-   * clock skew between the adapter and the app matters.
+   * Expiry chosen by the adapter: a strict ISO-8601 date-time that names its
+   * zone, `Z` or an offset like `-05:00` (for example `2026-10-10T16:17:14.411Z`,
+   * what `Date.prototype.toISOString` returns). A timestamp without a zone,
+   * a non-ISO string such as `"2099"` or `"Dec 25, 2099"`, and an impossible
+   * date such as February 30 are rejected, never read in the server's local
+   * time. For a newly acquired hold it must also be later than this process's
+   * `Date.now()`, so clock skew between the adapter and the app matters.
    */
   expiresAt: string;
 }
@@ -206,7 +210,41 @@ export interface ReserveCapacityRequest {
   limit: number;
   /** Non-blank idempotency key for one logical operation (see `key` for "blank"). Reuse it on every retry; a new id is a new operation. */
   operationId: string;
+  /**
+   * Optional size of this hold, in the same unit as `limit`: a safe integer
+   * >= 1, typically integer micro-dollars from {@link estimateCostMicros}
+   * (rounded up, so never 0 for real usage). When omitted, a hold is one unit,
+   * exactly as before, and the adapter receives no `amount` key.
+   *
+   * When present, the adapter must create the hold only when confirmed usage
+   * plus unexpired holds plus `amount` is at most `limit`, and
+   * `confirmReservation` receives a {@link CapacitySettlement} saying how much
+   * to record.
+   */
+  amount?: number;
 }
+
+/**
+ * How much a confirmed hold should record, passed to `confirmReservation` as
+ * its second argument only when the request had an `amount`.
+ *
+ * - `usage: 'reported'`: the work reported its real cost; record `amount`
+ *   (which can be more than `reservedAmount` when the estimate ran low; record
+ *   it anyway, never cap it at the hold; the result's `overrunAmount` reports
+ *   the difference). A reported `-0` is recorded as `0`.
+ * - `usage: 'unknown'`: the work could not report its cost (or did not say);
+ *   `amount` equals `reservedAmount`, the full estimate. Unknown is never zero.
+ */
+export interface CapacitySettlement {
+  usage: 'reported' | 'unknown';
+  /** What to record as confirmed usage. A safe integer >= 0. */
+  amount: number;
+  /** The request's `amount`: the size of the hold being confirmed. */
+  reservedAmount: number;
+}
+
+/** What `doTheWork` may report about its real cost when the request had an `amount`. */
+export type CapacitySettle = { actualAmount: number } | { usage: 'unknown' };
 
 /** What an adapter's `reserveCapacity` returns. */
 export type ReserveCapacityResult =
@@ -243,8 +281,12 @@ export interface CapacityReservationLedger {
    * `(key, operationId)` must never create a second hold.
    */
   reserveCapacity(request: ReserveCapacityRequest): Promise<ReserveCapacityResult>;
-  /** Turn a hold into confirmed usage. Must be idempotent. Called once, after `succeeded` work. */
-  confirmReservation(reservation: CapacityReservation): Promise<void>;
+  /**
+   * Turn a hold into confirmed usage. Must be idempotent. Called once, after
+   * `succeeded` work. `settlement` is passed only when the request had an
+   * `amount`; record `settlement.amount` (see {@link CapacitySettlement}).
+   */
+  confirmReservation(reservation: CapacityReservation, settlement?: CapacitySettlement): Promise<void>;
   /** Drop a hold without counting it. Must be idempotent. Called once, only after work reported `failed`. */
   releaseReservation(reservation: CapacityReservation): Promise<void>;
 }
@@ -256,7 +298,18 @@ export interface CapacityReservationLedger {
  * write), so the reservation remains held for reconciliation.
  */
 export type CapacityWorkOutcome<T> =
-  | { status: "succeeded"; value: T }
+  | {
+      status: "succeeded";
+      value: T;
+      /**
+       * Only read when the request had an `amount`: `{ actualAmount }` (a safe
+       * integer >= 0, for example `estimateCostMicros` of the real usage) or
+       * `{ usage: 'unknown' }`. Omitted means unknown, which records the full
+       * estimate. Any other value makes the outcome `work_outcome_ambiguous`.
+       * Ignored when the request had no `amount`.
+       */
+      settle?: CapacitySettle;
+    }
   | { status: "failed"; error: unknown };
 
 /** Result of {@link withCapacityReservation}. Every status except `denied` and `confirmed` needs reconciliation before any retry of paid work. */
@@ -264,7 +317,20 @@ export type CapacityReservationResult<T> =
   | { status: "denied"; reason?: string }
   | { status: "operation_in_progress"; reservation: CapacityReservation }
   | { status: "operation_terminal"; operationId: string; reason?: string }
-  | { status: "confirmed"; reservation: CapacityReservation; value: T }
+  | {
+      status: "confirmed";
+      reservation: CapacityReservation;
+      value: T;
+      /** Present only when the request had an `amount`: what `confirmReservation` was asked to record. */
+      settlement?: CapacitySettlement;
+      /**
+       * Present only when the reported actual amount was MORE than the hold
+       * (`settlement.amount - settlement.reservedAmount`, at least 1). The
+       * full actual amount was still recorded; this field only makes the
+       * overrun visible, so alert on it. Absent otherwise.
+       */
+      overrunAmount?: number;
+    }
   | { status: "released_after_failure"; reservation: CapacityReservation; error: unknown }
   | {
       status: "release_failed";
@@ -282,6 +348,10 @@ export type CapacityReservationResult<T> =
       reservation: CapacityReservation;
       value: T;
       error: unknown;
+      /** Present only when the request had an `amount`. */
+      settlement?: CapacitySettlement;
+      /** Present only when the actual amount was more than the hold; see the `confirmed` result. */
+      overrunAmount?: number;
     };
 
 /**
@@ -291,9 +361,11 @@ export type CapacityReservationResult<T> =
  * - It reads `request` once (its `limit`, `key` and `operationId`), validates
  *   that snapshot and throws, without calling the adapter, for a `request`
  *   that is not a plain or null-prototype object, a limit that is not a safe
- *   integer >= 0, or a blank key/operationId (empty, or only whitespace and
- *   invisible characters). The adapter receives a fresh
- *   `{ key, limit, operationId }` copy, and every later comparison uses the
+ *   integer >= 0, a blank key/operationId (empty, or only whitespace and
+ *   invisible characters), or an `amount` that is present but not a safe
+ *   integer >= 1. The adapter receives a fresh
+ *   `{ key, limit, operationId }` copy (plus `amount` only when it was given;
+ *   see {@link CapacitySettlement}), and every later comparison uses the
  *   validated values, so neither the caller changing its object nor the
  *   adapter editing its argument can change what a reservation is checked
  *   against.
@@ -311,8 +383,9 @@ export type CapacityReservationResult<T> =
  * - `{ status: 'succeeded' }` leads to one `confirmReservation` call;
  *   `{ status: 'failed' }` to one `releaseReservation` call. It never calls
  *   both, never calls either twice, and never retries.
- * - A thrown or rejected `doTheWork`, or an outcome of the wrong shape,
- *   returns `work_outcome_ambiguous` and keeps the hold. A failed confirm
+ * - A thrown or rejected `doTheWork`, an outcome of the wrong shape, or an
+ *   outcome whose fields throw when read (a hostile getter or proxy), returns
+ *   `work_outcome_ambiguous` and keeps the hold. A failed confirm
  *   returns `confirmation_failed` (with the value) and keeps the hold.
  * - A rejected `reserveCapacity` propagates; no work runs. A hold may or may
  *   not exist; retry with the same operationId to find out.
@@ -332,7 +405,7 @@ export type CapacityReservationResult<T> =
  *   returns a decision or reservation of the wrong shape.
  * @throws RangeError for a `limit` that is not a safe integer >= 0, a blank
  *   key, operationId or reservation id, a reservation for a different key or
- *   operationId, an unparseable or already-expired `expiresAt`, a terminal
+ *   operationId, an `expiresAt` that is not a strict ISO-8601 timestamp with a zone, or is already expired, a terminal
  *   decision for a different operation, or an unknown decision status.
  */
 export async function withCapacityReservation<T>(
@@ -340,8 +413,10 @@ export async function withCapacityReservation<T>(
   request: ReserveCapacityRequest,
   doTheWork: (reservation: CapacityReservation) => Promise<CapacityWorkOutcome<T>>,
 ): Promise<CapacityReservationResult<T>> {
-  const { key, limit, operationId } = readReserveCapacityRequest(request);
-  const decision: unknown = await ledger.reserveCapacity({ key, limit, operationId });
+  const { key, limit, operationId, amount } = readReserveCapacityRequest(request);
+  const decision: unknown = await ledger.reserveCapacity(
+    amount === undefined ? { key, limit, operationId } : { key, limit, operationId, amount },
+  );
   if (!decision || typeof decision !== 'object' || !('status' in decision)) {
     throw new TypeError("withCapacityReservation: adapter returned an invalid reservation decision");
   }
@@ -368,16 +443,22 @@ export async function withCapacityReservation<T>(
   }
 
   const reservation = readReservation(decisionRecord.reservation, key, operationId);
-  let outcome: unknown;
+  let parsed: ReturnType<typeof readCapacityWorkOutcome<T>>;
+  let settlement: CapacitySettlement | undefined;
   try {
     // The callback gets a frozen copy, so nothing it does can change the
     // snapshot that is confirmed or released below.
-    outcome = await doTheWork(Object.freeze({ ...reservation }));
+    const outcome: unknown = await doTheWork(Object.freeze({ ...reservation }));
+    // Reading the outcome runs the caller's getters or proxy traps. Paid work
+    // has already happened, so a throw here must be the documented ambiguous
+    // result with the hold kept, never an exception that loses the reservation.
+    parsed = readCapacityWorkOutcome<T>(outcome, amount !== undefined);
+    if (parsed?.status === "succeeded" && amount !== undefined) {
+      settlement = readSettle(parsed.settle, amount);
+    }
   } catch (error) {
     return { status: "work_outcome_ambiguous", reservation, error };
   }
-
-  const parsed = readCapacityWorkOutcome<T>(outcome);
   if (!parsed) {
     return {
       status: "work_outcome_ambiguous",
@@ -395,12 +476,48 @@ export async function withCapacityReservation<T>(
     }
   }
 
-  try {
-    await ledger.confirmReservation(reservation);
-    return { status: "confirmed", reservation, value: parsed.value };
-  } catch (error) {
-    return { status: "confirmation_failed", reservation, value: parsed.value, error };
+  if (settlement === undefined) {
+    try {
+      await ledger.confirmReservation(reservation);
+      return { status: "confirmed", reservation, value: parsed.value };
+    } catch (error) {
+      return { status: "confirmation_failed", reservation, value: parsed.value, error };
+    }
   }
+  // An actual amount above the hold is recorded as is (see readSettle); the
+  // result also says by how much, and only when it happened.
+  const overrun = settlement.amount > settlement.reservedAmount ? { overrunAmount: settlement.amount - settlement.reservedAmount } : {};
+  try {
+    await ledger.confirmReservation(reservation, settlement);
+    return { status: "confirmed", reservation, value: parsed.value, settlement, ...overrun };
+  } catch (error) {
+    return { status: "confirmation_failed", reservation, value: parsed.value, error, settlement, ...overrun };
+  }
+}
+
+/** Turn the work's `settle` report into what the adapter records. Throws (making the outcome ambiguous) on anything malformed. */
+function readSettle(settle: unknown, reservedAmount: number): CapacitySettlement {
+  if (settle === undefined) {
+    return Object.freeze({ usage: "unknown", amount: reservedAmount, reservedAmount });
+  }
+  if (!isPlainRecord(settle)) {
+    throw new TypeError("withCapacityReservation: outcome.settle must be { actualAmount } or { usage: 'unknown' }");
+  }
+  const keys = Reflect.ownKeys(settle);
+  if (keys.length === 1 && keys[0] === "actualAmount") {
+    const actualAmount: unknown = settle.actualAmount;
+    if (typeof actualAmount !== "number" || !Number.isSafeInteger(actualAmount) || actualAmount < 0) {
+      throw new RangeError("withCapacityReservation: outcome.settle.actualAmount must be a non-negative safe integer");
+    }
+    return Object.freeze({ usage: "reported", amount: actualAmount + 0, reservedAmount }); // -0 reads as 0
+  }
+  if (keys.length === 1 && keys[0] === "usage") {
+    const usage: unknown = settle.usage;
+    if (usage === "unknown") {
+      return Object.freeze({ usage: "unknown", amount: reservedAmount, reservedAmount });
+    }
+  }
+  throw new TypeError("withCapacityReservation: outcome.settle must be { actualAmount } or { usage: 'unknown' }");
 }
 
 /** Read the request once and validate what was read. Returns plain copies of the three fields. */
@@ -414,6 +531,7 @@ function readReserveCapacityRequest(request: ReserveCapacityRequest): ReserveCap
   const limit: unknown = request.limit;
   const key: unknown = request.key;
   const operationId: unknown = request.operationId;
+  const amount: unknown = request.amount;
   if (typeof limit !== "number") {
     throw new TypeError("withCapacityReservation: limit must be a non-negative safe integer");
   }
@@ -432,8 +550,21 @@ function readReserveCapacityRequest(request: ReserveCapacityRequest): ReserveCap
   if (isBlank(operationId)) {
     throw new RangeError("withCapacityReservation: operationId must be a non-empty string");
   }
-  return { key, limit, operationId };
+  if (amount === undefined) {
+    return { key, limit, operationId };
+  }
+  if (typeof amount !== "number") {
+    throw new TypeError("withCapacityReservation: amount must be a safe integer >= 1 when present");
+  }
+  if (!Number.isSafeInteger(amount) || amount < 1) {
+    throw new RangeError("withCapacityReservation: amount must be a safe integer >= 1 when present");
+  }
+  return { key, limit, operationId, amount };
 }
+
+const EXPIRES_AT_MESSAGE =
+  "withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp with a time zone " +
+  "(for example 2026-10-10T16:17:14.411Z or 2026-10-10T11:17:14.411-05:00); a timestamp without Z or an offset is rejected";
 
 function readReservation(
   candidate: unknown,
@@ -468,11 +599,14 @@ function readReservation(
     throw new RangeError("withCapacityReservation: reservation operationId does not match request");
   }
   if (typeof expiresAt !== "string") {
-    throw new TypeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+    throw new TypeError(EXPIRES_AT_MESSAGE);
   }
-  const expiresAtMs = Date.parse(expiresAt);
-  if (!Number.isFinite(expiresAtMs)) {
-    throw new RangeError("withCapacityReservation: reservation expiresAt must be a valid ISO-8601 timestamp");
+  // Strict, zone-required parse. `Date.parse` would read a string without a
+  // zone as this machine's local time, so the same hold could look live or
+  // expired depending on the server's TZ.
+  const expiresAtMs = parseIsoInstant(expiresAt);
+  if (expiresAtMs === undefined) {
+    throw new RangeError(EXPIRES_AT_MESSAGE);
   }
   if (requireUnexpired && expiresAtMs <= Date.now()) {
     throw new RangeError("withCapacityReservation: adapter returned an expired reservation");
@@ -483,15 +617,391 @@ function readReservation(
 /** Read a work outcome once. Returns `undefined` for anything that is not a well-formed outcome. */
 function readCapacityWorkOutcome<T>(
   value: unknown,
-): { status: "succeeded"; value: T } | { status: "failed"; error: unknown } | undefined {
+  readSettleField = false,
+): { status: "succeeded"; value: T; settle: unknown } | { status: "failed"; error: unknown } | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
   const status: unknown = record.status;
   if (status === "succeeded") {
-    return Object.prototype.hasOwnProperty.call(record, "value") ? { status, value: record.value as T } : undefined;
+    if (!Object.prototype.hasOwnProperty.call(record, "value")) return undefined;
+    const outcomeValue = record.value as T;
+    // Read only for an `amount` request, so every other outcome is read exactly as before.
+    const settle: unknown =
+      readSettleField && Object.prototype.hasOwnProperty.call(record, "settle") ? record.settle : undefined;
+    return { status, value: outcomeValue, settle };
   }
   if (status === "failed") {
     return Object.prototype.hasOwnProperty.call(record, "error") ? { status, error: record.error } : undefined;
   }
   return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Commit once
+// ---------------------------------------------------------------------------
+
+/** Where a {@link CommitOnce} is: never called, running, done, or failed for good. */
+export type CommitOnceState = "idle" | "pending" | "committed" | "failed";
+
+/**
+ * What {@link CommitOnce.attempt} resolves to. `ran` is true only for the call
+ * that actually executed the commit function (also when it then threw or
+ * rejected); every other call, concurrent or later, joins and gets `ran: false`
+ * with the same outcome.
+ */
+export type CommitOnceResult<T> =
+  | { ran: boolean; status: "committed"; value: T }
+  | { ran: boolean; status: "failed"; error: unknown };
+
+/** A function that runs its commit at most once; see {@link createCommitOnce}. */
+export interface CommitOnce<T> {
+  /** Run the commit (first call) or join it (every later call). Every caller gets the same promise. */
+  (): Promise<T>;
+  /**
+   * `idle` until the first call, then `pending`, then `committed` or `failed`.
+   * It leaves `pending` when the shared promise settles (a microtask after
+   * `fn` returns, even for a synchronous `fn`), so read it after awaiting.
+   */
+  readonly state: CommitOnceState;
+  /**
+   * Like calling the function, but it never rejects and it says whether this
+   * call ran the commit. Resolves to `{ ran, status: 'committed', value }` or
+   * `{ ran, status: 'failed', error }` (the thrown or rejected value as is,
+   * even when falsy). A throwing `fn` is therefore a `failed` result with
+   * `ran: true` on the first call and `ran: false` on every later one, and it
+   * is never run again. It shares the same single run as the plain call, so
+   * mixing the two is safe.
+   */
+  attempt(): Promise<CommitOnceResult<T>>;
+}
+
+/**
+ * Wrap a commit (for example `commitUsage`) so it runs at most once, however
+ * many times and however concurrently it is called. Made for counting a
+ * streamed call on its FIRST visible output: call the returned function from
+ * every chunk handler, and the usage is recorded exactly once, as soon as the
+ * user has seen something.
+ *
+ * - The first call runs `fn` synchronously and returns a promise of its
+ *   result. Every other call, concurrent or later, returns that same promise
+ *   and never runs `fn` again.
+ * - A failure is surfaced, not swallowed: if `fn` throws or rejects, the
+ *   shared promise rejects with that error for every caller, including later
+ *   ones, and `state` becomes `failed`.
+ * - **A failed commit cannot be retried through the same instance.** `fn`
+ *   runs at most once, ever. A commit can fail after its write landed (a lost
+ *   reply), so retrying automatically could count the call twice. Decide in
+ *   your own code whether to reconcile or create a new `createCommitOnce` for
+ *   a deliberate retry.
+ * - Await the returned promise to see a failure. The instance tracks `state`
+ *   with its own handler, so a fire-and-forget call does not produce an
+ *   unhandled rejection; it is not silent either, because `state` stays
+ *   `failed` and every later call rejects with the same error.
+ *
+ * It keeps no timers and no global state; each call to `createCommitOnce`
+ * makes an independent instance.
+ *
+ * @example
+ *   const countOnce = createCommitOnce(() => ledger.commitUsage(`${userId}:${today}`));
+ *   for await (const chunk of stream) {
+ *     if (chunk.text) await countOnce(); // counted on first visible output, once
+ *     write(chunk.text);
+ *   }
+ *   // countOnce.state === 'idle' here means nothing was shown and nothing was counted.
+ *
+ * @throws TypeError (synchronously, at creation) when `fn` is not a function.
+ */
+export function createCommitOnce<T>(fn: () => T | PromiseLike<T>): CommitOnce<T> {
+  if (typeof fn !== "function") {
+    throw new TypeError("createCommitOnce: fn must be a function");
+  }
+  let state: CommitOnceState = "idle";
+  let shared: Promise<T> | undefined;
+  const commit = (): Promise<T> => {
+    if (shared) return shared;
+    let resolveShared!: (value: T | PromiseLike<T>) => void;
+    let rejectShared!: (reason: unknown) => void;
+    // Assign the shared promise before running fn, so a re-entrant call from
+    // inside fn joins it instead of running fn a second time.
+    shared = new Promise<T>((resolve, reject) => {
+      resolveShared = resolve;
+      rejectShared = reject;
+    });
+    state = "pending";
+    const settled = shared.then(
+      () => {
+        state = "committed";
+      },
+      () => {
+        state = "failed";
+      },
+    );
+    void settled;
+    try {
+      resolveShared(fn());
+    } catch (error) {
+      rejectShared(error);
+    }
+    return shared;
+  };
+  const attempt = (): Promise<CommitOnceResult<T>> => {
+    const ran = shared === undefined; // true only for the call that is about to run fn
+    return commit().then(
+      (value): CommitOnceResult<T> => ({ ran, status: "committed", value }),
+      (error: unknown): CommitOnceResult<T> => ({ ran, status: "failed", error }),
+    );
+  };
+  Object.defineProperty(commit, "state", { get: () => state, enumerable: true });
+  Object.defineProperty(commit, "attempt", { value: attempt, enumerable: true });
+  return commit as CommitOnce<T>;
+}
+
+// ---------------------------------------------------------------------------
+// Several scopes at once: a per-user cap inside a global cap
+// ---------------------------------------------------------------------------
+
+/** One capped scope of {@link withCapacityReservations}: a ledger key and its limit. */
+export interface ReservationScope {
+  key: string;
+  limit: number;
+}
+
+/** Input to {@link withCapacityReservations}. */
+export interface ReserveScopesRequest {
+  /**
+   * 1 to 8 scopes with distinct keys, for example the user's daily dollar cap
+   * and the global one. They are reserved in this order, so list the scope you
+   * most want named in a refusal first.
+   */
+  scopes: readonly ReservationScope[];
+  /** Non-blank idempotency key for one logical operation. It is used on every scope. */
+  operationId: string;
+  /** Size of the hold on every scope, a safe integer >= 1 (typically micro-dollars). */
+  amount: number;
+}
+
+/** Result of {@link withCapacityReservations}. */
+export type CapacityReservationsResult<T> =
+  | {
+      status: 'confirmed';
+      /** What `doTheWork` returned. */
+      value: T;
+      /** What every scope's `confirmReservation` was asked to record. */
+      settlement: CapacitySettlement;
+      /** Present only when the reported actual amount was more than the hold. */
+      overrunAmount?: number;
+      /** The hold on each scope, in request order. */
+      reservations: readonly CapacityReservation[];
+    }
+  | {
+      /** A scope's ledger did not give a hold; `doTheWork` did not run and every hold taken before it was released. */
+      status: 'refused';
+      refusal: 'denied' | 'operation_in_progress' | 'operation_terminal';
+      scopeKey: string;
+      reason?: string;
+    }
+  | {
+      /** `doTheWork` reported `failed` (no charge): every hold was released. */
+      status: 'released_after_failure';
+      error: unknown;
+    }
+  | {
+      /**
+       * At least one hold is still in place and needs your reconciliation:
+       * work whose outcome is unknown, a failed confirm, or a failed release.
+       * `result` is that scope's own result from {@link withCapacityReservation}.
+       * Treat paid work as possibly done; do not retry it.
+       */
+      status: 'needs_reconciliation';
+      scopeKey: string;
+      result: CapacityReservationResult<unknown>;
+    };
+
+type ScopedInner<T> =
+  | { kind: 'done'; outcome: { status: 'succeeded'; value: T; settle: unknown } | { status: 'failed'; error: unknown } }
+  | { kind: 'confirmed'; value: T; settlement: CapacitySettlement; overrunAmount?: number }
+  | { kind: 'refused'; refusal: 'denied' | 'operation_in_progress' | 'operation_terminal'; scopeKey: string; reason?: string }
+  | { kind: 'failed'; error: unknown }
+  | { kind: 'problem'; scopeKey: string; result: CapacityReservationResult<unknown> };
+
+const MAX_RESERVATION_SCOPES = 8;
+
+/**
+ * Reserve the same amount on several scopes, run paid work once, and settle
+ * every scope: the daily-dollars-per-user-and-global pattern.
+ *
+ * It is {@link withCapacityReservation} nested once per scope, in request
+ * order, so everything that function guarantees holds for each scope: work runs
+ * at most once and only after EVERY scope gave a hold; it never retries; a
+ * thrown or malformed outcome keeps every hold; confirm and release are each
+ * called at most once per scope. What it adds is the bookkeeping nobody should
+ * hand-write:
+ *
+ * - If a later scope refuses, the holds already taken are released (no paid
+ *   work ran), and the result names the refusing scope.
+ * - If the work fails (`failed`), every hold is released.
+ * - If the work succeeds, every scope is confirmed with the same settlement:
+ *   the reported `actualAmount`, or the full estimate for `{ usage: 'unknown' }`
+ *   (a missing `settle` means unknown). An actual above the hold is recorded as
+ *   is and reported as `overrunAmount`.
+ * - Anything unresolved (ambiguous work, a failed confirm, a failed release)
+ *   returns `needs_reconciliation` with the scope's own result, and the holds
+ *   stay in place.
+ *
+ * Holds are taken one ledger round trip per scope, so this is not atomic across
+ * scopes: a refusal on the second scope briefly held capacity on the first.
+ * That errs toward refusing, never toward overspending.
+ *
+ * Invalid input (no scopes, more than 8, duplicate or blank keys, a bad limit
+ * or amount) throws before the ledger is called. A ledger that rejects on the
+ * first scope propagates the rejection, with no work run; on a later scope the
+ * earlier holds are kept and the result is `needs_reconciliation`.
+ *
+ * `doTheWork` receives a frozen array of the holds, in request order.
+ */
+export async function withCapacityReservations<T>(
+  ledger: CapacityReservationLedger,
+  request: ReserveScopesRequest,
+  doTheWork: (reservations: readonly CapacityReservation[]) => Promise<CapacityWorkOutcome<T>>,
+): Promise<CapacityReservationsResult<T>> {
+  const fn = 'withCapacityReservations';
+  if (!isPlainRecord(request)) {
+    throw new TypeError(`${fn}: request must be an object with scopes, operationId and amount (a plain object)`);
+  }
+  const rawScopes: unknown = request.scopes;
+  const operationId: unknown = request.operationId;
+  const amount: unknown = request.amount;
+  if (!Array.isArray(rawScopes)) {
+    throw new TypeError(`${fn}: scopes must be an array of { key, limit }`);
+  }
+  const count = rawScopes.length;
+  if (count < 1 || count > MAX_RESERVATION_SCOPES) {
+    throw new RangeError(`${fn}: scopes must have between 1 and ${MAX_RESERVATION_SCOPES} entries`);
+  }
+  if (amount === undefined) {
+    throw new TypeError(`${fn}: amount is required: a safe integer >= 1`);
+  }
+  const scopes: Array<{ key: string; limit: number; operationId: string; amount: number }> = [];
+  const seen = new Set<string>();
+  for (let i = 0; i < count; i++) {
+    const scope: unknown = rawScopes[i];
+    if (!isPlainRecord(scope)) {
+      throw new TypeError(`${fn}: scopes[${i}] must be a plain { key, limit } object`);
+    }
+    const read = readReserveCapacityRequest({
+      key: scope.key as string,
+      limit: scope.limit as number,
+      operationId: operationId as string,
+      amount: amount as number,
+    });
+    if (seen.has(read.key)) {
+      throw new RangeError(`${fn}: scopes must have distinct keys`);
+    }
+    seen.add(read.key);
+    scopes.push({ key: read.key, limit: read.limit, operationId: read.operationId, amount: read.amount as number });
+  }
+  if (typeof doTheWork !== 'function') {
+    throw new TypeError(`${fn}: doTheWork must be a function`);
+  }
+
+  const held: CapacityReservation[] = [];
+
+  async function level(i: number): Promise<ScopedInner<T>> {
+    const scope = scopes[i] as (typeof scopes)[number];
+    let deeperProblem: ScopedInner<T> | undefined;
+    const result = await withCapacityReservation<ScopedInner<T>>(ledger, scope, async (reservation) => {
+      held[i] = reservation;
+      let inner: ScopedInner<T>;
+      if (i + 1 < scopes.length) {
+        inner = await level(i + 1);
+      } else {
+        // The innermost level runs the paid work. The outcome is read once here;
+        // a throw, a getter that throws or a malformed outcome keeps every hold.
+        const outcome: unknown = await doTheWork(Object.freeze([...held]));
+        inner = { kind: 'done', outcome: readScopedOutcome<T>(outcome) };
+      }
+      switch (inner.kind) {
+        case 'done':
+          return inner.outcome.status === 'succeeded'
+            ? { status: 'succeeded', value: inner, settle: inner.outcome.settle as CapacitySettle | undefined }
+            : { status: 'failed', error: inner };
+        case 'confirmed':
+          return { status: 'succeeded', value: inner, settle: settleOf(inner.settlement) };
+        case 'refused':
+        case 'failed':
+          return { status: 'failed', error: inner };
+        case 'problem':
+          deeperProblem = inner;
+          throw new Error(`${fn}: a deeper scope needs reconciliation, so this hold is kept`);
+      }
+    });
+
+    switch (result.status) {
+      case 'denied':
+        return { kind: 'refused', refusal: 'denied', scopeKey: scope.key, ...(result.reason === undefined ? {} : { reason: result.reason }) };
+      case 'operation_in_progress':
+        return { kind: 'refused', refusal: 'operation_in_progress', scopeKey: scope.key };
+      case 'operation_terminal':
+        return { kind: 'refused', refusal: 'operation_terminal', scopeKey: scope.key, ...(result.reason === undefined ? {} : { reason: result.reason }) };
+      case 'confirmed': {
+        const inner = result.value;
+        const value = inner.kind === 'done' ? (inner.outcome as { value: T }).value : (inner as { value: T }).value;
+        return {
+          kind: 'confirmed',
+          value,
+          settlement: result.settlement as CapacitySettlement,
+          ...(result.overrunAmount === undefined ? {} : { overrunAmount: result.overrunAmount }),
+        };
+      }
+      case 'released_after_failure': {
+        const inner = result.error as ScopedInner<T>;
+        if (inner.kind === 'done') return { kind: 'failed', error: (inner.outcome as { error: unknown }).error };
+        return inner; // refused or failed, from a deeper scope
+      }
+      case 'work_outcome_ambiguous':
+        return deeperProblem ?? { kind: 'problem', scopeKey: scope.key, result };
+      case 'release_failed':
+      case 'confirmation_failed':
+        return { kind: 'problem', scopeKey: scope.key, result };
+    }
+  }
+
+  const top = await level(0);
+  switch (top.kind) {
+    case 'confirmed':
+      return {
+        status: 'confirmed',
+        value: top.value,
+        settlement: top.settlement,
+        ...(top.overrunAmount === undefined ? {} : { overrunAmount: top.overrunAmount }),
+        reservations: Object.freeze([...held]),
+      };
+    case 'refused':
+      return { status: 'refused', refusal: top.refusal, scopeKey: top.scopeKey, ...(top.reason === undefined ? {} : { reason: top.reason }) };
+    case 'failed':
+      return { status: 'released_after_failure', error: top.error };
+    case 'problem':
+      return { status: 'needs_reconciliation', scopeKey: top.scopeKey, result: top.result };
+    case 'done':
+      // Unreachable: level() never returns 'done'. Fail closed if it ever does.
+      throw new Error(`${fn}: internal error: unresolved work outcome`);
+  }
+}
+
+/** Settle value that records the same amount a confirmed scope recorded. */
+function settleOf(settlement: CapacitySettlement): CapacitySettle {
+  return settlement.usage === 'reported' ? { actualAmount: settlement.amount } : { usage: 'unknown' };
+}
+
+/** Read the paid work's outcome once. Throws (keeping every hold) on anything malformed. */
+function readScopedOutcome<T>(
+  outcome: unknown,
+): { status: 'succeeded'; value: T; settle: unknown } | { status: 'failed'; error: unknown } {
+  const parsed = readCapacityWorkOutcome<T>(outcome, true);
+  if (!parsed) {
+    throw new Error('withCapacityReservations: doTheWork returned an invalid outcome');
+  }
+  return parsed.status === 'succeeded'
+    ? { status: 'succeeded', value: parsed.value, settle: parsed.settle }
+    : { status: 'failed', error: parsed.error };
 }

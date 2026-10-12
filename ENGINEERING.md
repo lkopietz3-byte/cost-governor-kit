@@ -28,6 +28,10 @@
   is only looked up if it is a string.
 - Text built from caller or adapter strings (error messages, `formatRatesForLog`)
   escapes control, line-break and bidi characters. Structured results stay raw.
+- A reservation's `expiresAt` is a strict ISO-8601 date-time that names its
+  zone (`Z` or `±hh:mm`), parsed by `parseIsoInstant` in `src/internal.ts`, not
+  `Date.parse`. A string without a zone is rejected, never read as the machine's
+  local time. `checkPreCallCeiling` omits `reason` when allowed.
 - `withReserveConfirm` never commits a call that throws, and fails closed on a
   non-boolean check. Advisory under concurrency; a rejected `commitUsage`
   returns the result with `commitError` set, not discarded. Detect it with
@@ -35,9 +39,81 @@
   `commitUsage` resolves is ignored, so only a rejection reports a failure.
 - `withCapacityReservation` runs work at most once, only after a validated
   `acquired` decision; calls confirm or release at most once, never both;
-  never retries; never releases after an ambiguous outcome. The strict limit,
+  never retries; never releases after an ambiguous outcome. Reading the work
+  outcome is inside the protective `try`, so an outcome whose getter or proxy
+  throws is `work_outcome_ambiguous` with the hold kept. The strict limit,
   atomicity, duplicate suppression and durability belong to the caller's
   adapter.
+
+- `admissionHttpStatus` returns `null` (permission to proceed) only for a
+  well-formed admitted outcome: a canonical UTC day or hour `windowId` and no
+  `scopeKey`. Anything else is 503.
+- `admitBeforeCall` never throws, never rejects, never retries and never
+  refunds. Only a validated `admitted` reply allows a call; a malformed request,
+  a store throw, a timeout or a malformed reply is `unavailable`. The request is
+  read once (the scopes array's `length` once, then each element by index),
+  the store gets a frozen copy, a reply after the deadline (taken before the
+  store runs) is a timeout even if it says admitted, and the reply is read once and
+  checked against that copy (canonical `windowId` for the requested window,
+  `scopeKey` among the requested keys, no admit past a zero limit). The atomic
+  increment belongs to the caller's store. `createInMemoryAdmissionStore` is a
+  single-process test double: atomic within one process, windows never move
+  backwards, a limit only goes down within a window.
+- Amount-based reservations: without `amount`, the adapter request and the
+  `confirmReservation` call are exactly as before (one argument). With it, a
+  missing or `{ usage: 'unknown' }` settle records the full estimate, never 0,
+  and a malformed settle is `work_outcome_ambiguous` with the hold kept.
+- `createCommitOnce` runs `fn` at most once per instance, ever; a failed commit
+  rejects for every caller and is not retried.
+  `attempt()` shares that single run, never rejects and reports `ran` (true only
+  for the call that executed `fn`).
+- Amounts are safe integers of micro-dollars. A reserve `amount` or reported
+  `actualAmount` that is `NaN`, infinite, fractional, negative, above 2^53 - 1 or
+  a BigInt is rejected (a reported `-0` is recorded as 0). An actual above the
+  hold is recorded as is and also reported as `overrunAmount` on the result,
+  present only then; the `CapacitySettlement` shape is unchanged.
+- Dated pricing tables (`definePricingTable`) hold integer-micro prices: each
+  entry is `{ inputPerMTokMicros, outputPerMTokMicros, cacheWritePerMTokMicros?,
+  cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?, longContext? }`, every
+  price a safe integer (a `-0` reads as 0; a BigInt, fraction or value above
+  2^53 - 1 is rejected). The table is frozen all the way down. `priceFor`
+  returns `{ status: 'unknown-model', key? }` for any key that is not an own key and
+  never a fallback price. `estimateCostMicros(usage, price)` is BigInt
+  arithmetic, rounds up once on the sum, throws for a bucket with tokens and no
+  price, and applies the long-context prices to every bucket or none (no
+  per-bucket fallback to the base tier). Prices and usage are read once, and
+  only own properties are ever read, so a polluted `Object.prototype` supplies
+  nothing.
+- `usageFromAnthropic` and `usageFromOpenAI` never throw: they return
+  `{ status: 'known', usage }` or `{ status: 'unknown', reason }`, where the
+  reason is escaped and capped. Wherever the response cannot be read exactly
+  (missing usage, a non-number or non-integer count, an unrecognized field, a
+  total that disagrees with its split, a hostile getter or Proxy) the reading is
+  unknown, which settles as `{ usage: 'unknown' }` and keeps the reserved
+  estimate, never zero. A cache field that is absent counts as 0; one that is
+  present and malformed is unknown.
+- Usage readers accept what the official SDK types declare as informational or
+  null/default and refuse what could change the bill: `output_tokens_details`
+  (inside the billed `output_tokens`), `inference_geo` of null or `'global'`,
+  `speed` of `'standard'`, null `iterations`/`fallback_credit`, OpenAI
+  `cache_write_tokens` of 0 and `text_tokens` are known; another `inference_geo`
+  (unless the caller lists it), `speed: 'fast'`, populated `iterations`, nonzero
+  cache-write, audio or image tokens, and any field not declared are unknown.
+  Ambiguous stays unknown. A stream is final only with a `message_delta`
+  (`usageFromAnthropicStream`); without one it is unknown. Embeddings have their
+  own reader, because a chat usage that lacks its output count must stay unknown.
+- `withCapacityReservations` is `withCapacityReservation` nested once per scope.
+  Input is validated before the ledger is called (1 to 8 scopes, distinct keys,
+  amount a safe integer >= 1); work runs at most once and only after every scope
+  gave a hold; anything unresolved keeps every hold and returns
+  `needs_reconciliation` naming the scope; a refusal or reported failure releases
+  every earlier hold. It is not atomic across scopes and errs toward refusing.
+  `createInMemoryCapacityLedger` is a single-process test double.
+- `checkPreCallCeiling`'s `requireOutputTokens` is additive and off by default;
+  when true a missing `outputTokens` throws a TypeError (the usage is copied once
+  first).
+- `assertPricingFresh(table, { now, maxAgeDays })` is the only signature; `now`
+  always comes from the caller, and any other options key is rejected.
 
 ## Set up and verify
 
@@ -53,12 +129,12 @@ npm run audit:dependencies
 Mutation testing is run by hand, not in CI: `npm i -D --no-save
 @stryker-mutator/core @stryker-mutator/vitest-runner` and a local
 `stryker.config.json` (not committed) with the vitest runner and
-`mutate: ["src/**/*.ts", "!src/**/*.test.ts"]`. Before the 0.2.0 fix pass it
-scored 87.03% (369 of 424 mutants killed; the 0.1.0 tests left the
-adapter-returned shape guards and the `rates` null case untested). At 0.2.0 it
-scores 100% (537 killed, none survived), and v8 coverage is 100% of lines and
-branches (it was 95.2% and 94.7%). The v8 provider is
-`@vitest/coverage-v8@4.1.11`, also installed with `--no-save`.
+`mutate: ["src/**/*.ts", "!src/**/*.test.ts"]`. At 0.2.0 it scored 100% (537
+mutants killed, none survived) and v8 coverage was 100% of lines and branches.
+Those numbers are for 0.2.0. The admission, pricing-table, usage-reader and
+capacity-ledger code added since has not been through mutation testing and its
+coverage has not been measured. The v8 provider is
+`@vitest/coverage-v8@4.1.11`, installed with `--no-save`.
 
 `verify:package` packs the build, rejects tests/configs/scripts in the
 tarball, installs it offline into a temporary project, imports every export,
@@ -71,23 +147,31 @@ with strict NodeNext settings. After an intended export change, run
 
 This is an ESM package; `exports`' `default` condition also lets plain
 CommonJS `require("cost-governor-kit")` work, on Node 20.19+/22.12+
-(`require(esm)` support — see README). No source maps are shipped
-(deliberate, not an oversight — see README's "Honest limits").
+(`require(esm)` support, see README). No source maps are shipped
+(deliberate, not an oversight; see README's "Honest limits").
 `build` clears `dist/` before invoking `tsc`, since `tsc` does not delete
 outputs it stopped emitting.
 
+`test/verdict-table.test.ts` is a named table of verdicts (regressions and
+guards); it is part of `npm test` and also runs the README quickstart and usage
+snippets as written.
+
 CI (`.github/workflows/verify.yml`) runs audit, lint, typecheck, test, build,
-`attw` and `verify:package` on Node 26.3.0, plus build, test and
+`attw` and `verify:package` on Node 26.3.0, a `postgres` job running
+`test:postgres` against Postgres 17, plus build, test and
 `verify:package` (which includes the CommonJS consumer probe) on Node 20, 20.19.0,
 22, 22.12.0 and 24. 20.19.0 and 22.12.0 are the exact `require(esm)` floors;
 the unpinned 20 and 22 track the latest release of each line. Actions are
 pinned by commit SHA.
 
-`npm run test:postgres` runs `src/referenceImplPostgres.test.ts` against a
-real, locally running Postgres 17, pointed at by `COST_GOVERNOR_PG_URL`. It is
-skipped (not run) by `npm test`, `npm run verify`, or CI when that variable is
-unset, so it needs no CI infrastructure and adds no dependency to the normal
-verify path. See README.md ("Reference SQL (advisory only)") for the exact
+`npm run test:postgres` runs `src/referenceImplPostgres.test.ts` and
+`src/capacityLedgerPostgres.test.ts` against a real Postgres 17, pointed at by
+`COST_GOVERNOR_PG_URL`, one file at a time (together they would need more than
+the default 100 connections). It is skipped by
+`npm test` and `npm run verify` when that variable is unset, so the normal
+verify path needs no database. CI's `postgres` job in `verify.yml` runs it
+against a `postgres:17` service container and fails if the suite reports any
+skipped, pending, failed or zero tests (a skipped suite otherwise exits 0). See README.md ("Reference SQL (advisory only)") for the exact
 commands to start a throwaway server and run it. It is the only test that
 proves anything about concurrent Postgres sessions.
 
@@ -95,12 +179,23 @@ proves anything about concurrent Postgres sessions.
 
 - No real storage adapter is tested. Unit tests use single-process in-memory
   doubles; they prove the helpers' call sequencing, not atomicity.
+- The README's Postgres admission recipe runs on PGlite in `npm test`
+  (`src/admissionRecipePglite.test.ts`), a single connection: it proves the
+  recipe's logic and that an ordinary non-owner role with only the documented
+  `EXECUTE` grant can admit (the function is `security definer`), not that a
+  cap holds under concurrent sessions or across instances. The D1 and Redis recipes are not run by any test.
+- The capacity-ledger recipe in the README runs on PGlite in `npm test`
+  (`src/capacityLedgerRecipePglite.test.ts`: the README's SQL, adapter and both
+  route examples, one connection). Concurrency is covered only by
+  `src/capacityLedgerPostgres.test.ts` (50 sessions on a local Postgres 17,
+  opt-in through `npm run test:postgres`). `npm run verify` skips that suite;
+  CI's `postgres` job runs it.
 - The reference SQL runs against PostgreSQL 18 via PGlite in `npm test` (CI
   covers it), a **single connection**: this proves the grant fix and the
   check/commit/window logic, not concurrent sessions or a live Supabase
   project. The same test extracts the commented TypeScript adapter from the SQL
   file and runs it through a stub of the Supabase client's `rpc()`; it does not
-  run `@supabase/supabase-js`. `npm run test:postgres` (not run by CI; see above) covers real
+  run `@supabase/supabase-js`. `npm run test:postgres` (CI runs it in its own `postgres` job; see above) covers real
   concurrent sessions against a local Postgres 17 and proves
   `usage_ledger_commit_usage`'s row lock caps the recorded count exactly at
   the limit under 50 concurrent commits, and that
@@ -117,15 +212,15 @@ proves anything about concurrent Postgres sessions.
 
 CI runs [`arethetypeswrong`](https://github.com/arethetypeswrong/arethetypeswrong.github.io)
 (`npm run attw`, which is `attw --pack . --ignore-rules cjs-resolves-to-esm`) against the
-packed tarball after the build step, and the release workflow runs it too. All four entry points
-(`.`, `./pricing`, `./preCallCeiling`, `./reserveConfirm`) resolve under `node10`, `node16`
+packed tarball after the build step, and the release workflow runs it too. All five entry points
+(`.`, `./pricing`, `./preCallCeiling`, `./reserveConfirm`, `./admission`) resolve under `node10`, `node16`
 (from CJS and from ESM) and `bundler`. `package.json` carries a `typesVersions` map for the
-three subpaths because `node10` resolution ignores `exports`; it must be kept in step with
+four subpaths because `node10` resolution ignores `exports`; it must be kept in step with
 `exports` when a subpath is added.
 
 The `cjs-resolves-to-esm` rule is ignored on purpose: this is an ESM-only package
 (`"type": "module"`, no `require` entry point), so a CommonJS consumer must use Node's
-`require(esm)` support (Node >=20.19 or >=22.12 — see "Runtime support policy" below) rather
+`require(esm)` support (Node >=20.19 or >=22.12, see "Runtime support policy" below) rather
 than a native `require`. A dual CJS+ESM build was rejected to avoid the dual-package hazard
 (two separately-identified copies of the same module, with broken `instanceof` checks and
 duplicated module state across the CJS and ESM entry points).
@@ -150,16 +245,17 @@ installable for anyone already pinned to it. Do not plan on unpublish.
 
 Before publishing, also check the `npm pack --dry-run` file list and the downstream
 `honesty-mcp` build, since that server consumes this package's subpath exports directly. A
-0.x minor bump is outside a `^0.1.0` range, so a consumer on that range does not pick up
-0.2.0 until it changes the range; 0.2.0 changed input validation (plain records, blank ids,
-model-name type) and error text, and `honesty-mcp` must mirror it.
+0.x minor bump is outside a `^0.2.0` range, so a consumer on that range does not pick up
+0.3.0 until it changes the range. 0.3.0 adds the `./admission` subpath and makes a few
+inputs throw (see the CHANGELOG's Breaking changes), and `honesty-mcp` must mirror what
+it exposes.
 Rollback for consumers is pinning the previous version or commit; do not roll back past
 a validation fix without restoring an equivalent check.
 
 ### Runtime support policy
 
 - **Supported (recommended for production):** Node 22 and 24 LTS; Node 26 current.
-- **Compatibility-tested:** Node 20. Node 20 is end-of-life — nodejs.org's release page
+- **Compatibility-tested:** Node 20. Node 20 is end-of-life: nodejs.org's release page
   (<https://nodejs.org/en/about/previous-releases>) lists it as `EOL`, with its final release
   dated Mar 24, 2026. The `compat` job in `verify.yml` still runs on Node 20 to catch
   regressions, but that runtime gets no security fixes upstream; don't run production traffic

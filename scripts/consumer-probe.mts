@@ -35,6 +35,41 @@ import {
   type ReserveConfirmResult,
 } from 'cost-governor-kit/reserveConfirm';
 
+import {
+  admitBeforeCall,
+  admissionHttpStatus,
+  createInMemoryAdmissionStore,
+  type AdmissionDecision,
+  type AdmissionRequest,
+  type AdmissionScope,
+  type AdmissionStore,
+  type AdmissionUnavailableReason,
+  type AdmissionWindow,
+  type AdmitOutcome,
+} from 'cost-governor-kit/admission';
+import {
+  assertPricingFresh,
+  definePricingTable,
+  estimateCostMicros,
+  priceFor,
+  usageFromAnthropic,
+  usageFromAnthropicStream,
+  usageFromOpenAI,
+  usageFromOpenAIEmbeddings,
+  type AnthropicUsageOptions,
+  type DatedPricingTable,
+  type PriceLookup,
+  type UsageReading,
+} from 'cost-governor-kit/pricing';
+import {
+  createCommitOnce,
+  withCapacityReservations,
+  type CapacityReservationsResult,
+  type CapacitySettlement,
+  type CommitOnce,
+} from 'cost-governor-kit/reserveConfirm';
+import { createInMemoryCapacityLedger } from 'cost-governor-kit';
+
 const table: PricingTable = { 'toy-model': { inputPerMillion: 3, outputPerMillion: 15 } };
 const rates: ModelRates = getRatesOrThrow(table, 'toy-model');
 // cacheReadPerMillion is optional on ModelRates and typed as a number.
@@ -107,5 +142,60 @@ async function advisory(): Promise<number | undefined> {
   return outcome.allowed ? outcome.result : outcome.result;
 }
 
+async function admission(): Promise<429 | 503 | null> {
+  const scopes: AdmissionScope[] = [{ key: 'global', limit: 10 }];
+  const window: AdmissionWindow = 'utc-hour';
+  const custom: AdmissionStore = {
+    admit: async (request: AdmissionRequest): Promise<AdmissionDecision> => ({ status: 'admitted', windowId: request.window }),
+  };
+  const outcome: AdmitOutcome = await admitBeforeCall(createInMemoryAdmissionStore({ now: () => new Date() }), { scopes, window, timeoutMs: 1000 });
+  if (outcome.status === 'unavailable') {
+    const reason: AdmissionUnavailableReason = outcome.reason;
+    void reason;
+  } else if (outcome.status === 'limited') {
+    const key: string = outcome.scopeKey;
+    void key;
+  }
+  // @ts-expect-error a scope needs a limit.
+  void admitBeforeCall(custom, { scopes: [{ key: 'k' }] });
+  return admissionHttpStatus(outcome, { perUserScopePrefixes: ['user:'] });
+}
+
+const dated: DatedPricingTable = definePricingTable({
+  checkedAt: '2026-10-01',
+  source: 'synthetic',
+  rates: { 'toy:model': { inputPerMTokMicros: 3_000_000, outputPerMTokMicros: 15_000_000, cacheReadPerMTokMicros: 300_000 } },
+});
+// @ts-expect-error an entry needs inputPerMTokMicros and outputPerMTokMicros.
+definePricingTable({ checkedAt: '2026-10-01', source: 's', rates: { 'toy:model': { inputPerMTokMicros: 3_000_000 } } });
+assertPricingFresh(dated, { now: new Date(), maxAgeDays: 30 });
+const lookup: PriceLookup = priceFor(dated, 'toy:model');
+const reading: UsageReading = usageFromAnthropic({});
+const micros: number = lookup.status === 'found' && reading.status === 'known' ? estimateCostMicros(reading.usage, lookup.price) : 0;
+const openAiUsage: UsageReading = usageFromOpenAI({});
+const unknownReason: string = openAiUsage.status === 'unknown' ? openAiUsage.reason : '';
+const attempted: Promise<unknown> = createCommitOnce(async () => 1).attempt();
+const geoOptions: AnthropicUsageOptions = { allowInferenceGeo: ['us'] };
+const streamReading: UsageReading = usageFromAnthropicStream({ input_tokens: 1, output_tokens: 1 }, undefined, geoOptions);
+const embeddingsReading: UsageReading = usageFromOpenAIEmbeddings({ prompt_tokens: 1 });
+const scoped: Promise<CapacityReservationsResult<number>> = withCapacityReservations(
+  createInMemoryCapacityLedger(),
+  { scopes: [{ key: 'u', limit: 10 }], operationId: 'o', amount: 5 },
+  async () => ({ status: 'succeeded', value: 1 }),
+);
+// @ts-expect-error a reservation request needs an amount.
+void withCapacityReservations(createInMemoryCapacityLedger(), { scopes: [{ key: 'u', limit: 10 }], operationId: 'o' }, async () => ({ status: 'succeeded', value: 1 }));
+const once: CommitOnce<number> = createCommitOnce(async () => 1);
+const commitState: 'idle' | 'pending' | 'committed' | 'failed' = once.state;
+const amountRequest: ReserveCapacityRequest = { key: 'k', limit: 10, operationId: 'o', amount: 5 };
+const settledLedger: CapacityReservationLedger = {
+  reserveCapacity: async (): Promise<ReserveCapacityResult> => ({ status: 'denied' }),
+  confirmReservation: async (reservation: CapacityReservation, settlement?: CapacitySettlement) =>
+    void [reservation.id, settlement?.amount, settlement?.usage],
+  releaseReservation: async (reservation: CapacityReservation) => void reservation.id,
+};
+const settleOutcome: CapacityWorkOutcome<number> = { status: 'succeeded', value: 1, settle: { actualAmount: 4 } };
+
+void [admission, micros, openAiUsage, unknownReason, attempted, streamReading, embeddingsReading, scoped, commitState, amountRequest, settledLedger, settleOutcome];
 void reservationSubpath;
 void [strict, advisory, allowed, multiplier, logLine, reason];

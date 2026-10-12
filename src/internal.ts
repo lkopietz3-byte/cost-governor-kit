@@ -75,3 +75,36 @@ export function describe(value: unknown): string {
 export function isBlank(text: string): boolean {
   return /^[\p{White_Space}\p{Default_Ignorable_Code_Point}]*$/u.test(text);
 }
+
+// YYYY-MM-DDTHH:mm[:ss[.f{1,9}]] followed by a REQUIRED zone: `Z` or `+hh:mm` / `-hh:mm`.
+const ISO_INSTANT = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{1,9}))?)?(?:Z|([+-])(\d{2}):(\d{2}))$/;
+
+/**
+ * Parse a strict ISO-8601 date-time that names its zone, to epoch milliseconds,
+ * or return `undefined`. `Date.parse` is not used because it reads a string
+ * without a zone as the machine's local time (so the same hold is live or
+ * expired depending on the server's TZ), accepts non-ISO text such as `"2099"`
+ * or `"Dec 25, 2099"`, and rolls impossible dates forward (`02-30` becomes
+ * `03-02`, `T24:00` becomes the next day). Here the date and time must be real,
+ * the separator `T` and the zone letter `Z` are upper case, and the offset has
+ * a colon (`+05:30`). Fractional seconds beyond milliseconds are truncated.
+ */
+export function parseIsoInstant(text: string): number | undefined {
+  const m = ISO_INSTANT.exec(text);
+  if (!m) return undefined;
+  const [year, month, day, hour, minute] = [m[1], m[2], m[3], m[4], m[5]].map(Number) as [number, number, number, number, number];
+  const second = m[6] === undefined ? 0 : Number(m[6]);
+  const millis = m[7] === undefined ? 0 : Number(m[7].padEnd(3, '0').slice(0, 3));
+  const offsetHour = m[9] === undefined ? 0 : Number(m[9]);
+  const offsetMinute = m[10] === undefined ? 0 : Number(m[10]);
+  if (month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 || offsetHour > 23 || offsetMinute > 59) return undefined;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  const daysInMonth = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1] as number;
+  if (day < 1 || day > daysInMonth) return undefined;
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day); // Date.UTC would map years 0-99 to 1900-1999
+  date.setUTCHours(hour, minute, second, millis);
+  const offsetMs = (offsetHour * 60 + offsetMinute) * 60_000 * (m[8] === '-' ? -1 : 1);
+  const instant = date.getTime() - offsetMs;
+  return Number.isFinite(instant) ? instant : undefined;
+}
