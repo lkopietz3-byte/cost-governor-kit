@@ -1,7 +1,7 @@
 {
   "schema": "threshold-sdk-source-v1",
   "package": "cost-governor-kit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "revision": "9758e584cba40807fe18727041486d23483fdb6b",
   "sourceDirty": false,
   "generatedAt": "2026-10-11T02:17:05.095Z",

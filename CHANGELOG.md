@@ -6,6 +6,41 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - unreleased
+
+Minor release. The exports are all additive: every 0.2.1 export is still there
+with the same name and signature. A few inputs that were accepted now throw, and
+three results changed, so read the list below before upgrading.
+
+### Breaking changes
+
+- **`expiresAt` must carry a time zone.** `withCapacityReservation` used to read
+  a zone-less `expiresAt` as the server's local time; it now throws a
+  `RangeError` for anything that is not a strict ISO-8601 date-time ending in
+  `Z` or `+hh:mm` / `-hh:mm`. Also rejected: non-ISO text (`"2099"`,
+  `"Dec 25, 2099"`), impossible dates (`02-30`, `T24:00`), a space instead of
+  `T`, lowercase `t` or `z`, an offset without a colon (`+0000`) or with hours
+  only (`+00`), and more than nine fractional digits. Migration: format the
+  value in the adapter before returning it, for example
+  `new Date(row.expires_at).toISOString()`; raw Postgres text such as
+  `2026-10-10 16:17:14.411+00` must be converted. Fractional seconds past
+  milliseconds are truncated.
+- **`request.amount` is now read.** A `withCapacityReservation` request that
+  carries an `amount` which is not a safe integer >= 1 (for example `null` or a
+  string) now throws before the adapter is called; before, the field was
+  ignored. Migration: remove the field, or rename it, if it was unrelated to
+  micro-dollar holds.
+- **`checkPreCallCeiling` omits `reason` when allowed.** The key used to be
+  present with the value `undefined`. This changes `Object.hasOwn`,
+  `Object.keys` and strict-equality checks on the result. Migration: branch on
+  `allowed`, and read `reason` only when it is false.
+- **A throwing work-outcome getter no longer throws.** If the outcome that
+  `doTheWork` returned has a getter or Proxy trap that throws, the result is
+  now `work_outcome_ambiguous` with the hold kept, where the error used to
+  escape after the paid work ran. Migration: handle that result status (you
+  already needed to for other unreadable outcomes); a surrounding `catch` no
+  longer sees this case.
+
 ### Added
 
 - **Multi-scope admission control** (new subpath `cost-governor-kit/admission`,
@@ -52,7 +87,7 @@ All notable changes to this project are documented here. The format follows
   cacheWritePerMTokMicros?, cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?,
   longContext? }` keyed `provider:model` (safe integers; the kit ships no
   prices) and returns a deeply frozen table. `priceFor(table, key)` returns
-  `{ status: 'found', key, price }` or `{ status: 'unknown-model' }`, with no
+  `{ status: 'found', key, price }` or `{ status: 'unknown-model', key? }`, with no
   fallback price. `assertPricingFresh(table, { now, maxAgeDays })` takes `now`
   from the caller. New types `DatedPricingTable`, `PricingTableDefinition`,
   `MicrosPrice`, `MicrosRates`, `LongContextRates`, `PriceLookup`,
@@ -110,22 +145,13 @@ All notable changes to this project are documented here. The format follows
 
 ### Fixed
 
-- **`expiresAt` without a time zone is rejected (was read as local time).**
-  `withCapacityReservation` parsed a reservation's `expiresAt` with
-  `Date.parse`, which reads `2026-10-10T16:17:14.411` as the server's local
-  time. Depending on the server's TZ, an expired hold could be accepted or a
-  live one rejected. It also accepted non-ISO text (`"2099"`,
-  `"Dec 25, 2099"`) and rolled impossible dates forward (`02-30` became
-  `03-02`, `T24:00` became the next day). `expiresAt` must now be a strict
-  ISO-8601 date-time ending in `Z` or `±hh:mm`; anything else throws a
-  `RangeError` that names the missing zone.
-- **A throwing work-outcome getter no longer escapes after paid work.** Reading
-  the outcome `doTheWork` returned ran outside the protective `try`, so a
-  getter or proxy trap that threw lost the reservation. It now returns
-  `work_outcome_ambiguous` with the hold kept and neither confirm nor release
-  called, like any other unreadable outcome.
-- **`checkPreCallCeiling` omits `reason` when allowed.** The key used to be
-  present with the value `undefined`.
+- **`expiresAt` is no longer read as local time.** The old `Date.parse` read a
+  zone-less `2026-10-10T16:17:14.411` in the server's time zone, so an expired
+  hold could be accepted or a live one rejected, and it rolled impossible dates
+  forward (`02-30` became `03-02`). See Breaking changes.
+- **A throwing work-outcome getter no longer loses the reservation.** Reading
+  the outcome ran outside the protective `try`. See Breaking changes.
+- **`checkPreCallCeiling` omits `reason` when allowed** (see Breaking changes).
 - **The ceiling denial message no longer contradicts itself.** A ceiling that is
   not a whole number of micro-dollars is printed with the extra digits needed to
   read below the projected total (`$4.9999996`, not `$5.000000`). Whole
@@ -136,19 +162,7 @@ All notable changes to this project are documented here. The format follows
 
 ### Changed
 
-- **Behavior:** `withCapacityReservation` now reads `request.amount`. A request
-  object that already carried an unrelated `amount` that is not a safe integer
-  >= 1 (for example `null` or a string) now throws before the adapter is
-  called; before, the field was ignored.
-- **Behavior:** `expiresAt` values that used to be accepted now throw: no zone,
-  non-ISO strings, impossible dates, a space instead of `T`, lowercase `t`/`z`,
-  an offset without a colon (`+0000`) or with hours only (`+00`), and more than
-  nine fractional digits. An adapter that returns raw Postgres text such as
-  `2026-10-10 16:17:14.411+00` must format it as ISO first. Fractional seconds
-  past milliseconds are truncated.
-- **Behavior:** the `reason` key is absent (not `undefined`) on an allowed
-  result, which changes `Object.hasOwn`, `Object.keys` and strict-equality
-  checks on the result.
+- `npm run test:postgres` now runs both Postgres suites, one file at a time.
 - CI runs `npm run test:postgres` in a new `postgres` job against a
   `postgres:17` service container and fails if that suite reports any skipped
   test.
@@ -339,14 +353,14 @@ First release.
   a PGlite test proves a role with no grant is denied and `service_role` is
   allowed.
 - CommonJS `require("cost-governor-kit")` works alongside `import`, on Node
-  20.19+/22.12+ (`require(esm)` support) — `exports` adds a `default`
+  20.19+/22.12+ (`require(esm)` support); `exports` adds a `default`
   condition next to `import` for every entry point.
 - Every input-validation failure in `pricing.ts`, `preCallCeiling.ts` and
   `reserveConfirm.ts` throws a `TypeError` (wrong type or shape) or a
   `RangeError` (right type, bad value) instead of a plain `Error`, matching
   the sibling kits. Plain `Error` remains only for the internal "result
   overflowed to non-finite" safety net and `getRatesOrThrow`'s
-  unconfigured-model lookup — neither is malformed input.
+  unconfigured-model lookup, neither of which is malformed input.
 - README's Quickstart now imports from the package root
   (`from 'cost-governor-kit'`) as the primary example; the per-module
   subpaths (`/pricing`, `/preCallCeiling`, `/reserveConfirm`) remain

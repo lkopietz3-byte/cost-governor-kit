@@ -1,6 +1,6 @@
 {
   "name": "cost-governor-kit",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates, and reserve/confirm usage-counting helpers whose limits are enforced by your own storage adapter.",
   "keywords": [
     "llm",
