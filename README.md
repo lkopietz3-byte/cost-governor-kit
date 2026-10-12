@@ -222,7 +222,7 @@ are static configuration.
   than thrown, so a route handler's generic `catch` cannot turn one into an
   unguarded paid call. Log `cause` and your tests will find them.
 - `reason: 'store_error'`: the store threw or rejected (`cause` is what it threw).
-- `reason: 'timeout'`: no answer within `timeoutMs` (default 5,000 ms),
+- `reason: 'timeout'`: no answer within `timeoutMs` (default 5,000 ms, exported as `DEFAULT_ADMISSION_TIMEOUT_MS`),
   measured from just before the store is called. A store that blocks the event
   loop and answers late is also a timeout, even if it said `admitted`: the late
   admission is discarded, fail closed. The store may still have counted it;
@@ -1037,7 +1037,7 @@ supply it, otherwise `inRate x 0.1`.
 - `rates` (`ModelRates`): `{ inputPerMillion, outputPerMillion }`, USD per
   million tokens, each a finite number >= 0, no default; plus an optional
   `cacheReadPerMillion` (also USD per million, >= 0) that overrides the fixed
-  0.1x cache-read ratio — see below.
+  0.1x cache-read ratio (see below).
 - `usage` (`UsageTokens`): `inputTokens`, `outputTokens`, `cacheReadTokens`,
   `cacheCreation5mTokens`, `cacheCreation1hTokens`. Each is optional and
   defaults to 0 when omitted or `undefined`; a supplied value must be a
@@ -1133,7 +1133,7 @@ const table = definePricingTable({
   },
 });
 assertPricingFresh(table, { now: new Date(), maxAgeDays: 30 }); // throws once the table is older than 30 days
-const found = priceFor(table, 'anthropic:my-model'); // { status: 'found', key, price } or { status: 'unknown-model' }
+const found = priceFor(table, 'anthropic:my-model'); // { status: 'found', key, price } or { status: 'unknown-model', key? }
 if (found.status === 'unknown-model') throw new Error('no price for this model; refuse the call');
 const micros = estimateCostMicros({ inputTokens: 2_000, outputTokens: 500 }, found.price);
 ```
@@ -1153,7 +1153,8 @@ const micros = estimateCostMicros({ inputTokens: 2_000, outputTokens: 500 }, fou
 - The result is frozen all the way down with a null-prototype `rates` record, so
   editing your input afterward changes nothing.
 - **`priceFor(table, key)`** returns `{ status: 'found', key, price }` or
-  `{ status: 'unknown-model' }`. There is no fallback price, ever: an unknown
+  `{ status: 'unknown-model' }` (plus `key`, echoed, when you passed a string).
+  There is no fallback price, ever: an unknown
   key, a missing key, `constructor` and `__proto__` are all `unknown-model`.
   Decide what to do with that (refuse the call, or fail the deploy); a missing
   price must not become a free call. A malformed table or entry throws. It
@@ -1369,7 +1370,7 @@ return send200(result.result);
    discarded: this returns `{ allowed: true, result, commitError }` instead of
    rejecting, where `commitError` is whatever `commitUsage` rejected with. The
    presence of `commitError` (check `Object.hasOwn(result, 'commitError')`) is
-   your signal that the usage count may be under-recorded for this call — log
+   your signal that the usage count may be under-recorded for this call. Log
    it and reconcile. The value `commitUsage` resolves is ignored, so an adapter
    must reject, not resolve `false`, when it did not record the usage.
 
@@ -1637,7 +1638,7 @@ request took the last slot during the paid call), a missing or malformed row
 and an RPC error each come back as the paid result with `commitError` set, and
 the provider callback runs once. `@supabase/supabase-js` itself is not run.
 **PGlite is a single connection**, so this test proves nothing about concurrent
-sessions — the file's own header comment covers what happens then. It was
+sessions; the file's own header comment covers what happens then. It was
 not run against a live Supabase project. It ships in the npm tarball as
 copy-and-adapt reference material; nothing imports it.
 
@@ -1674,8 +1675,8 @@ succeed every time, the successful commits get distinct sequential counts
 1&ndash;10 with no gaps or duplicates, and the stored row never exceeds 10. A
 second scenario fires 50 concurrent `usage_ledger_check_under_limit` calls
 against a fresh key before any commits land: all 50 return `allowed: true`
-even though the limit is 10 — proving Phase 1 is genuinely advisory under
-real concurrency, exactly as the SQL file's header describes — while the
+even though the limit is 10, which proves Phase 1 is genuinely advisory under
+real concurrency, exactly as the SQL file's header describes, while the
 Phase 2 commits that follow still cap at 10. **What it does not prove:** live
 Supabase's own role/default-privilege setup and PgBouncer pooling, or
 behavior under a network partition or Postgres failover.

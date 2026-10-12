@@ -1,4 +1,4 @@
-# cost-governor-kit — agent instructions
+# cost-governor-kit: agent instructions
 
 Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates, and reserve/confirm usage-counting helpers whose limits are enforced by your own storage adapter.
 
@@ -13,6 +13,8 @@ Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates
 - `npm run typecheck`
 - `npm run test`
 - `npm run build`
+- `npm run verify:observatory` checks the example's vendored SDK copy against `src`; regenerate it with `node examples/observatory/tools/vendor-sdk.mjs` after changing `src`.
+- `npm run test:postgres` needs a live Postgres 17 in `COST_GOVERNOR_PG_URL` (see README); `verify` skips it.
 - `npm run verify:package` packs and installs the tarball offline; run `npm run build` first.
 
 ## Rules

@@ -77,7 +77,7 @@
   cacheWrite1hPerMTokMicros?, cacheReadPerMTokMicros?, longContext? }`, every
   price a safe integer (a `-0` reads as 0; a BigInt, fraction or value above
   2^53 - 1 is rejected). The table is frozen all the way down. `priceFor`
-  returns `{ status: 'unknown-model' }` for any key that is not an own key and
+  returns `{ status: 'unknown-model', key? }` for any key that is not an own key and
   never a fallback price. `estimateCostMicros(usage, price)` is BigInt
   arithmetic, rounds up once on the sum, throws for a bucket with tokens and no
   price, and applies the long-context prices to every bucket or none (no
@@ -129,12 +129,12 @@ npm run audit:dependencies
 Mutation testing is run by hand, not in CI: `npm i -D --no-save
 @stryker-mutator/core @stryker-mutator/vitest-runner` and a local
 `stryker.config.json` (not committed) with the vitest runner and
-`mutate: ["src/**/*.ts", "!src/**/*.test.ts"]`. Before the 0.2.0 fix pass it
-scored 87.03% (369 of 424 mutants killed; the 0.1.0 tests left the
-adapter-returned shape guards and the `rates` null case untested). At 0.2.0 it
-scores 100% (537 killed, none survived), and v8 coverage is 100% of lines and
-branches (it was 95.2% and 94.7%). The v8 provider is
-`@vitest/coverage-v8@4.1.11`, also installed with `--no-save`.
+`mutate: ["src/**/*.ts", "!src/**/*.test.ts"]`. At 0.2.0 it scored 100% (537
+mutants killed, none survived) and v8 coverage was 100% of lines and branches.
+Those numbers are for 0.2.0. The admission, pricing-table, usage-reader and
+capacity-ledger code added since has not been through mutation testing and its
+coverage has not been measured. The v8 provider is
+`@vitest/coverage-v8@4.1.11`, installed with `--no-save`.
 
 `verify:package` packs the build, rejects tests/configs/scripts in the
 tarball, installs it offline into a temporary project, imports every export,
@@ -147,8 +147,8 @@ with strict NodeNext settings. After an intended export change, run
 
 This is an ESM package; `exports`' `default` condition also lets plain
 CommonJS `require("cost-governor-kit")` work, on Node 20.19+/22.12+
-(`require(esm)` support — see README). No source maps are shipped
-(deliberate, not an oversight — see README's "Honest limits").
+(`require(esm)` support, see README). No source maps are shipped
+(deliberate, not an oversight; see README's "Honest limits").
 `build` clears `dist/` before invoking `tsc`, since `tsc` does not delete
 outputs it stopped emitting.
 
@@ -164,8 +164,10 @@ CI (`.github/workflows/verify.yml`) runs audit, lint, typecheck, test, build,
 the unpinned 20 and 22 track the latest release of each line. Actions are
 pinned by commit SHA.
 
-`npm run test:postgres` runs `src/referenceImplPostgres.test.ts` against a
-real Postgres 17, pointed at by `COST_GOVERNOR_PG_URL`. It is skipped by
+`npm run test:postgres` runs `src/referenceImplPostgres.test.ts` and
+`src/capacityLedgerPostgres.test.ts` against a real Postgres 17, pointed at by
+`COST_GOVERNOR_PG_URL`, one file at a time (together they would need more than
+the default 100 connections). It is skipped by
 `npm test` and `npm run verify` when that variable is unset, so the normal
 verify path needs no database. CI's `postgres` job in `verify.yml` runs it
 against a `postgres:17` service container and fails if the suite reports any
@@ -182,6 +184,12 @@ proves anything about concurrent Postgres sessions.
   recipe's logic and that an ordinary non-owner role with only the documented
   `EXECUTE` grant can admit (the function is `security definer`), not that a
   cap holds under concurrent sessions or across instances. The D1 and Redis recipes are not run by any test.
+- The capacity-ledger recipe in the README runs on PGlite in `npm test`
+  (`src/capacityLedgerRecipePglite.test.ts`: the README's SQL, adapter and both
+  route examples, one connection). Concurrency is covered only by
+  `src/capacityLedgerPostgres.test.ts` (50 sessions on a local Postgres 17,
+  opt-in through `npm run test:postgres`). `npm run verify` skips that suite;
+  CI's `postgres` job runs it.
 - The reference SQL runs against PostgreSQL 18 via PGlite in `npm test` (CI
   covers it), a **single connection**: this proves the grant fix and the
   check/commit/window logic, not concurrent sessions or a live Supabase
@@ -212,7 +220,7 @@ four subpaths because `node10` resolution ignores `exports`; it must be kept in 
 
 The `cjs-resolves-to-esm` rule is ignored on purpose: this is an ESM-only package
 (`"type": "module"`, no `require` entry point), so a CommonJS consumer must use Node's
-`require(esm)` support (Node >=20.19 or >=22.12 — see "Runtime support policy" below) rather
+`require(esm)` support (Node >=20.19 or >=22.12, see "Runtime support policy" below) rather
 than a native `require`. A dual CJS+ESM build was rejected to avoid the dual-package hazard
 (two separately-identified copies of the same module, with broken `instanceof` checks and
 duplicated module state across the CJS and ESM entry points).
@@ -237,16 +245,17 @@ installable for anyone already pinned to it. Do not plan on unpublish.
 
 Before publishing, also check the `npm pack --dry-run` file list and the downstream
 `honesty-mcp` build, since that server consumes this package's subpath exports directly. A
-0.x minor bump is outside a `^0.1.0` range, so a consumer on that range does not pick up
-0.2.0 until it changes the range; 0.2.0 changed input validation (plain records, blank ids,
-model-name type) and error text, and `honesty-mcp` must mirror it.
+0.x minor bump is outside a `^0.2.0` range, so a consumer on that range does not pick up
+0.3.0 until it changes the range. 0.3.0 adds the `./admission` subpath and makes a few
+inputs throw (see the CHANGELOG's Breaking changes), and `honesty-mcp` must mirror what
+it exposes.
 Rollback for consumers is pinning the previous version or commit; do not roll back past
 a validation fix without restoring an equivalent check.
 
 ### Runtime support policy
 
 - **Supported (recommended for production):** Node 22 and 24 LTS; Node 26 current.
-- **Compatibility-tested:** Node 20. Node 20 is end-of-life — nodejs.org's release page
+- **Compatibility-tested:** Node 20. Node 20 is end-of-life: nodejs.org's release page
   (<https://nodejs.org/en/about/previous-releases>) lists it as `EOL`, with its final release
   dated Mar 24, 2026. The `compat` job in `verify.yml` still runs on Node 20 to catch
   regressions, but that runtime gets no security fixes upstream; don't run production traffic
