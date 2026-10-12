@@ -156,6 +156,10 @@ three results changed, so read the list below before upgrading.
   not a whole number of micro-dollars is printed with the extra digits needed to
   read below the projected total (`$4.9999996`, not `$5.000000`). Whole
   micro-dollar ceilings print exactly as before.
+- **The usage readers read own properties only.** A token count placed on a
+  polluted `Object.prototype` could stand in for a missing `output_tokens` or
+  `prompt_tokens` and turn an `unknown` reading into a known, too-low one. The
+  provider usage readers now copy a record's own fields before reading.
 - **README usage-mapping snippet** priced `cache_creation_input_tokens` at $0
   when the `cache_creation` TTL split was absent. It now prices the total as
   5-minute writes in that case. The README snippet is run by a test.

@@ -615,7 +615,11 @@ function assertZero(fn: string, path: string, value: unknown, why: string): void
   }
 }
 
-/** A plain or null-prototype object whose own keys are all in `allowed`. */
+/**
+ * A plain or null-prototype object whose own keys are all in `allowed`,
+ * returned as a null-prototype snapshot of its own fields (each read once), so
+ * a field on a polluted `Object.prototype` can never stand in for a missing count.
+ */
 function readProviderRecord(fn: string, path: string, value: unknown, allowed: readonly string[]): Record<string, unknown> {
   if (!isPlainRecord(value)) {
     throw new TypeError(`${fn}: ${path} must be a plain object`);
@@ -628,7 +632,9 @@ function readProviderRecord(fn: string, path: string, value: unknown, allowed: r
       throw new TypeError(`${fn}: ${path} has unknown field ${describe(key)}; expected only ${allowed.join(', ')}`);
     }
   }
-  return value;
+  const own: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of Reflect.ownKeys(value) as string[]) own[key] = value[key];
+  return own;
 }
 
 /** A non-negative safe integer. `undefined`, and `null` when `optional`, read as 0. */

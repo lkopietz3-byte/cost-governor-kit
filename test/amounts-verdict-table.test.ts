@@ -20,7 +20,9 @@ import {
   definePricingTable,
   priceFor,
   usageFromAnthropic,
+  usageFromAnthropicStream,
   usageFromOpenAI,
+  usageFromOpenAIEmbeddings,
   withCapacityReservation,
   type CapacityReservationLedger,
   type CapacityWorkOutcome,
@@ -800,6 +802,25 @@ describe('self-hunt: found by attacking the first version', () => {
       expect(estimateCostMicros({}, bare)).toBe(0);
     } finally {
       for (const key of ['cacheReadPerMTokMicros', 'cacheWritePerMTokMicros', 'longContext', 'inputTokens']) delete proto[key];
+    }
+  });
+
+  it('a polluted Object.prototype never supplies a missing provider usage count', () => {
+    const proto = Object.prototype as unknown as Record<string, unknown>;
+    const keys = ['output_tokens', 'input_tokens', 'prompt_tokens', 'completion_tokens', 'cached_tokens', 'cache_read_input_tokens', 'total_tokens', 'thinking_tokens'];
+    try {
+      for (const key of keys) proto[key] = 0;
+      expect(usageFromAnthropic({ input_tokens: 100 }).status).toBe('unknown');
+      expect(usageFromAnthropicStream({ input_tokens: 100 }, { output_tokens: 5 }).status).toBe('known');
+      expect(usageFromAnthropicStream({}, { output_tokens: 5 }).status).toBe('unknown');
+      expect(usageFromOpenAI({ prompt_tokens: 100 }).status).toBe('unknown');
+      expect(usageFromOpenAI({ prompt_tokens: 100, completion_tokens: 5, prompt_tokens_details: {} })).toEqual({
+        status: 'known',
+        usage: { inputTokens: 100, outputTokens: 5, cacheReadTokens: 0 },
+      });
+      expect(usageFromOpenAIEmbeddings({}).status).toBe('unknown');
+    } finally {
+      for (const key of keys) delete proto[key];
     }
   });
 
