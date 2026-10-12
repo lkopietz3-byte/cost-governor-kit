@@ -481,7 +481,11 @@ function assertZero(fn, path, value, why) {
         throw new RangeError(`${fn}: ${path} is ${count}; ${why}`);
     }
 }
-/** A plain or null-prototype object whose own keys are all in `allowed`. */
+/**
+ * A plain or null-prototype object whose own keys are all in `allowed`,
+ * returned as a null-prototype snapshot of its own fields (each read once), so
+ * a field on a polluted `Object.prototype` can never stand in for a missing count.
+ */
 function readProviderRecord(fn, path, value, allowed) {
     if (!isPlainRecord(value)) {
         throw new TypeError(`${fn}: ${path} must be a plain object`);
@@ -494,7 +498,10 @@ function readProviderRecord(fn, path, value, allowed) {
             throw new TypeError(`${fn}: ${path} has unknown field ${describe(key)}; expected only ${allowed.join(', ')}`);
         }
     }
-    return value;
+    const own = Object.create(null);
+    for (const key of Reflect.ownKeys(value))
+        own[key] = value[key];
+    return own;
 }
 /** A non-negative safe integer. `undefined`, and `null` when `optional`, read as 0. */
 function readProviderCount(fn, path, value, optional) {
