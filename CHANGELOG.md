@@ -14,7 +14,7 @@ messages are the same as 0.3.0. Install with `npm install @evidencekit/spend-lim
 and update your imports; the old package name is no longer updated. The
 repository moved to `evidencekit/spend-limits`.
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-10-12
 
 Minor release. The exports are all additive: every 0.2.1 export is still there
 with the same name and signature. A few inputs that were accepted now throw, and
