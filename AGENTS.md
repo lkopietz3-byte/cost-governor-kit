@@ -1,4 +1,4 @@
-# cost-governor-kit: agent instructions
+# @evidencekit/spend-limits: agent instructions
 
 Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates, and reserve/confirm usage-counting helpers whose limits are enforced by your own storage adapter.
 

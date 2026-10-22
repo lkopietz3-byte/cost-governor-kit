@@ -1,4 +1,4 @@
-// CommonJS require() smoke test: proves `require('cost-governor-kit')` works
+// CommonJS require() smoke test: proves `require('@evidencekit/spend-limits')` works
 // for a plain CommonJS consumer, the way package.json `exports`' `default`
 // condition promises. scripts/verify-package.mjs only runs this file on a
 // Node version that supports `require(esm)` (Node 22.12+ or 20.19+); on an
@@ -8,9 +8,9 @@
 
 const assert = require('node:assert/strict');
 
-const root = require('cost-governor-kit');
-const pricing = require('cost-governor-kit/pricing');
-const ceiling = require('cost-governor-kit/preCallCeiling');
+const root = require('@evidencekit/spend-limits');
+const pricing = require('@evidencekit/spend-limits/pricing');
+const ceiling = require('@evidencekit/spend-limits/preCallCeiling');
 
 assert.equal(root.estimateCostUsd, pricing.estimateCostUsd, 'require()d root and subpath should share the same module');
 assert.equal(root.checkPreCallCeiling, ceiling.checkPreCallCeiling, 'require()d root and subpath should share the same module');
@@ -29,7 +29,7 @@ const denied = root.checkPreCallCeiling({
 });
 assert.equal(denied.allowed, false);
 
-const admission = require('cost-governor-kit/admission');
+const admission = require('@evidencekit/spend-limits/admission');
 assert.equal(root.admitBeforeCall, admission.admitBeforeCall, 'require()d root and admission subpath should share the same module');
 assert.equal(root.admissionHttpStatus({ status: 'unavailable', reason: 'timeout' }), 503);
 assert.equal(root.estimateCostMicros({ inputTokens: 1 }, { inputPerMTokMicros: 3_000_000, outputPerMTokMicros: 0 }), 3);

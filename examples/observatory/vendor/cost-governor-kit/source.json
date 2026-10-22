@@ -1,6 +1,6 @@
 {
   "schema": "threshold-sdk-source-v1",
-  "package": "cost-governor-kit",
+  "package": "@evidencekit/spend-limits",
   "version": "0.3.0",
   "revision": "9e3c0a897acf25d82240d737d7571c099de7aa9e",
   "sourceDirty": false,

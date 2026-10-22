@@ -146,7 +146,7 @@ with strict NodeNext settings. After an intended export change, run
 ## Packaging
 
 This is an ESM package; `exports`' `default` condition also lets plain
-CommonJS `require("cost-governor-kit")` work, on Node 20.19+/22.12+
+CommonJS `require("@evidencekit/spend-limits")` work, on Node 20.19+/22.12+
 (`require(esm)` support, see README). No source maps are shipped
 (deliberate, not an oversight; see README's "Honest limits").
 `build` clears `dist/` before invoking `tsc`, since `tsc` does not delete
@@ -244,10 +244,10 @@ is the normal recovery: publish a new patch version, and use
 installable for anyone already pinned to it. Do not plan on unpublish.
 
 Before publishing, also check the `npm pack --dry-run` file list and the downstream
-`honesty-mcp` build, since that server consumes this package's subpath exports directly. A
+`@evidencekit/mcp` build, since that server consumes this package's subpath exports directly. A
 0.x minor bump is outside a `^0.2.0` range, so a consumer on that range does not pick up
 0.3.0 until it changes the range. 0.3.0 adds the `./admission` subpath and makes a few
-inputs throw (see the CHANGELOG's Breaking changes), and `honesty-mcp` must mirror what
+inputs throw (see the CHANGELOG's Breaking changes), and `@evidencekit/mcp` must mirror what
 it exposes.
 Rollback for consumers is pinning the previous version or commit; do not roll back past
 a validation fix without restoring an equivalent check.

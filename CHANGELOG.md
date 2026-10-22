@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-22
+
+Renamed from `cost-governor-kit` to `@evidencekit/spend-limits`, as part of the
+Evidence Kit family. No behavior change: the exports, subpaths and error
+messages are the same as 0.3.0. Install with `npm install @evidencekit/spend-limits`
+and update your imports; the old package name is no longer updated. The
+repository moved to `evidencekit/spend-limits`.
+
 ## [0.3.0] - unreleased
 
 Minor release. The exports are all additive: every 0.2.1 export is still there

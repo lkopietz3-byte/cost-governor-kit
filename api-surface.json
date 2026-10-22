@@ -1,5 +1,5 @@
 {
-  "cost-governor-kit": [
+  "@evidencekit/spend-limits": [
     "CACHE_CREATION_1H_MULTIPLIER",
     "CACHE_CREATION_5M_MULTIPLIER",
     "CACHE_READ_MULTIPLIER",
@@ -25,7 +25,7 @@
     "withCapacityReservations",
     "withReserveConfirm"
   ],
-  "cost-governor-kit/pricing": [
+  "@evidencekit/spend-limits/pricing": [
     "CACHE_CREATION_1H_MULTIPLIER",
     "CACHE_CREATION_5M_MULTIPLIER",
     "CACHE_READ_MULTIPLIER",
@@ -41,16 +41,16 @@
     "usageFromOpenAI",
     "usageFromOpenAIEmbeddings"
   ],
-  "cost-governor-kit/preCallCeiling": [
+  "@evidencekit/spend-limits/preCallCeiling": [
     "checkPreCallCeiling"
   ],
-  "cost-governor-kit/reserveConfirm": [
+  "@evidencekit/spend-limits/reserveConfirm": [
     "createCommitOnce",
     "withCapacityReservation",
     "withCapacityReservations",
     "withReserveConfirm"
   ],
-  "cost-governor-kit/admission": [
+  "@evidencekit/spend-limits/admission": [
     "DEFAULT_ADMISSION_TIMEOUT_MS",
     "admissionHttpStatus",
     "admitBeforeCall",

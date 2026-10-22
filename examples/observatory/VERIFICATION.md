@@ -2,7 +2,7 @@
 
 ## Verified source
 
-The prepared SDK manifest identifies cost-governor-kit 0.2.0 at source revision
+The prepared SDK manifest identifies cost-governor-kit (now @evidencekit/spend-limits) 0.2.0 at source revision
 `e8601b90950938d7d8a6dab31b8860dc557ac1e9`. This branch does not change the SDK
 source, public API or runtime dependencies. The example uses synthetic requests,
 illustrative rates and a sequential memory ledger; the canvas replays the captured

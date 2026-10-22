@@ -204,7 +204,7 @@ function openInspector(stage = null) {
   $('inspector-state').textContent = visible ? `RECORDED STEP ${visible.sequence} / ${labels[visible.kind] || visible.kind}` : stage ? 'MECHANISM / NOT REACHED IN THIS ATTEMPT' : 'REAL SDK / CAPTURED PLAYBACK';
   $('inspector-detail').textContent = visible?.detail || (stage ? mechanisms[stage][1] : 'Run a bounded local experiment. Watch its recorded request move through five decisions. Lights show visited stages and the actual recorded outcome.');
   const state = event?.snapshot;
-  const facts = displaySession ? [['Operation ID', event?.operationId || 'Awaiting step'], ['Attempt ID', event?.attemptId || 'Awaiting step'], ['Captured conditions', conditions(displaySession.settings)], ['Known estimate', state ? `${money(state.spentUsd)}${state.unknownCostOperations ? ' + unknown usage' : ''}` : '$0.0000'], ['Source revision', source?.revision.slice(0, 7) || 'Unavailable']] : [['Source', source ? `cost-governor-kit ${source.version}` : 'Unavailable'], ['Animation', 'Completed journal playback'], ['Execution', 'Synthetic local callbacks']];
+  const facts = displaySession ? [['Operation ID', event?.operationId || 'Awaiting step'], ['Attempt ID', event?.attemptId || 'Awaiting step'], ['Captured conditions', conditions(displaySession.settings)], ['Known estimate', state ? `${money(state.spentUsd)}${state.unknownCostOperations ? ' + unknown usage' : ''}` : '$0.0000'], ['Source revision', source?.revision.slice(0, 7) || 'Unavailable']] : [['Source', source ? `@evidencekit/spend-limits ${source.version}` : 'Unavailable'], ['Animation', 'Completed journal playback'], ['Execution', 'Synthetic local callbacks']];
   $('inspector-facts').replaceChildren(...facts.map(([label, value]) => { const row = node('div', ''); row.append(node('dt', label), node('dd', value)); return row; }));
   const operation = event && displaySession.operations.find(row => row.attemptId === event.attemptId);
   $('pricing-lens').hidden = !operation;
@@ -253,13 +253,13 @@ function download(name, content, type) {
 }
 function summaryMarkdown() {
   const result = displaySession;
-  return `# Threshold / ${scenario(result.scenarioId).label}\n\nSynthetic local requests; real cost-governor-kit ${source.version} decisions. Recorded playback.\n\n- SDK source revision: ${source.revision}\n- Captured conditions: ${conditions(result.settings)}\n- Known estimated spend: ${money(result.summary.spentUsd)}\n- Confirmed: ${result.summary.confirmed}; held: ${result.summary.held}; unknown outcomes: ${result.summary.unknownCostOperations}\n- Completed attempts: ${result.summary.completedAttempts}\n\n${result.operations.map(row => `- ${row.label} / ${row.operationId}: ${row.status}. ${row.detail}`).join('\n')}\n\nIllustrative prices; synthetic sequential memory ledger. No provider billing, live Jev or MCP, production persistence or concurrency is established.\n`;
+  return `# Threshold / ${scenario(result.scenarioId).label}\n\nSynthetic local requests; real @evidencekit/spend-limits ${source.version} decisions. Recorded playback.\n\n- SDK source revision: ${source.revision}\n- Captured conditions: ${conditions(result.settings)}\n- Known estimated spend: ${money(result.summary.spentUsd)}\n- Confirmed: ${result.summary.confirmed}; held: ${result.summary.held}; unknown outcomes: ${result.summary.unknownCostOperations}\n- Completed attempts: ${result.summary.completedAttempts}\n\n${result.operations.map(row => `- ${row.label} / ${row.operationId}: ${row.status}. ${row.detail}`).join('\n')}\n\nIllustrative prices; synthetic sequential memory ledger. No provider billing, live Jev or MCP, production persistence or concurrency is established.\n`;
 }
 async function verifySource() {
   try {
     const response = await fetch('./vendor/cost-governor-kit/source.json'); if (!response.ok) throw new Error('Local SDK source manifest is unavailable');
     const candidate = await response.json();
-    if (candidate.schema !== 'threshold-sdk-source-v1' || candidate.package !== 'cost-governor-kit' || !/^[a-f0-9]{40}$/.test(candidate.revision) || typeof candidate.version !== 'string') throw new Error('Local SDK source manifest has an invalid shape');
+    if (candidate.schema !== 'threshold-sdk-source-v1' || candidate.package !== '@evidencekit/spend-limits' || !/^[a-f0-9]{40}$/.test(candidate.revision) || typeof candidate.version !== 'string') throw new Error('Local SDK source manifest has an invalid shape');
     for (const name of ['index.js', 'internal.js', 'micros.js', 'pricing.js', 'preCallCeiling.js', 'reserveConfirm.js', 'admission.js', 'capacityLedger.js', 'LICENSE']) {
       const response = await fetch(`./vendor/cost-governor-kit/${name}`); if (!response.ok) throw new Error(`SDK file unavailable: ${name}`);
       const bytes = await response.arrayBuffer(); const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes))).map(value => value.toString(16).padStart(2, '0')).join('');

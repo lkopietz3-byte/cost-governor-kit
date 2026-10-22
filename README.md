@@ -1,6 +1,8 @@
-# cost-governor-kit
+# @evidencekit/spend-limits
 
-**[Try it in your browser →](https://lkopietz3-byte.github.io/honesty-kits/#cost-governor-kit)** · Part of [honesty kits](https://github.com/lkopietz3-byte/honesty-kits), a family of small checks for the claims an AI product makes.
+**[Try it in your browser →](https://evidencekit.github.io/)** · Part of Evidence Kit: checks that tie AI output and public claims back to their evidence.
+
+Formerly published as `cost-governor-kit`.
 
 **Fail-closed admission and spend caps for AI endpoints, on a database you
 already run.** A small, zero-dependency TypeScript library for apps that call a
@@ -43,7 +45,7 @@ nothing when its store is not configured.
 | Cap dollars per user and globally, streaming included | [Daily dollar caps per user and global](#daily-dollar-caps-per-user-and-global) |
 | Price a call from a dated table, exact to the micro-dollar | [Dated price tables](#dated-price-tables-definepricingtable-assertpricingfresh-pricefor) and [`estimateCostMicros`](#estimatecostmicrosusage-price-number) |
 | Read a provider's usage, or admit you cannot | [Provider usage](#provider-usage-usagefromanthropicusage-usagefromopenaiusage) |
-| Refuse one call that would pass a spend ceiling | [Pre-call ceiling](#2-pre-call-ceiling-cost-governor-kitprecallceiling) |
+| Refuse one call that would pass a spend ceiling | [Pre-call ceiling](#2-pre-call-ceiling-evidencekitspend-limitsprecallceiling) |
 
 Quick map of the pieces: `admitBeforeCall` (call caps), `withCapacityReservations`
 (dollar caps over several scopes), `withCapacityReservation` (one scope),
@@ -55,7 +57,7 @@ test doubles for the admission store and the capacity ledger.
 ## Install
 
 ```bash
-npm install cost-governor-kit
+npm install @evidencekit/spend-limits
 ```
 
 Or build from source: clone the repository, then run `npm ci` and
@@ -66,8 +68,8 @@ load it. `require()` also works where Node can `require(esm)`:
 
 | How you load it | Node 20.19+ | Node 22.12+ | Node 24 and 26 | Older Node 20 or 22 |
 | --- | --- | --- | --- | --- |
-| `import { estimateCostUsd } from 'cost-governor-kit'` | works | works | works | works |
-| `require('cost-governor-kit')` | works | works | works | fails (no `require(esm)`); use `import()` |
+| `import { estimateCostUsd } from '@evidencekit/spend-limits'` | works | works | works | works |
+| `require('@evidencekit/spend-limits')` | works | works | works | fails (no `require(esm)`); use `import()` |
 
 ESM package; `require()` works on Node >=20.19 / >=22.12. Recommended runtimes
 are Node 22 and 24 (LTS) and Node 26 (current). Node 20 is end-of-life. CI
@@ -101,7 +103,7 @@ README.
 ## Quickstart
 
 ```js
-import { estimateCostUsd, formatRatesForLog, getRatesOrThrow, checkPreCallCeiling } from 'cost-governor-kit';
+import { estimateCostUsd, formatRatesForLog, getRatesOrThrow, checkPreCallCeiling } from '@evidencekit/spend-limits';
 
 // Your own table. These numbers are illustrative; use current published prices.
 const pricing = { 'my-model': { inputPerMillion: 3, outputPerMillion: 15 } };
@@ -145,9 +147,9 @@ that answers differently the second time cannot change a result. Error text
 built from your strings (a model name, an unknown usage key, a decision
 status) has control, line-break and bidi characters escaped.
 
-Every export above is also available from its own subpath (`cost-governor-kit/pricing`,
-`cost-governor-kit/preCallCeiling`, `cost-governor-kit/reserveConfirm`,
-`cost-governor-kit/admission`), importing the same module either way. Use a subpath if you only want one job's code in your
+Every export above is also available from its own subpath (`@evidencekit/spend-limits/pricing`,
+`@evidencekit/spend-limits/preCallCeiling`, `@evidencekit/spend-limits/reserveConfirm`,
+`@evidencekit/spend-limits/admission`), importing the same module either way. Use a subpath if you only want one job's code in your
 bundle; the root import above is the simplest default and, unlike the
 subpaths, resolves under TypeScript's legacy `node10`/`node` module
 resolution too.
@@ -178,7 +180,7 @@ increment itself lives in a store you write; the recipes below are starting
 points.
 
 ```ts
-import { admitBeforeCall, admissionHttpStatus, type AdmissionStore } from 'cost-governor-kit/admission';
+import { admitBeforeCall, admissionHttpStatus, type AdmissionStore } from '@evidencekit/spend-limits/admission';
 
 declare const store: AdmissionStore; // your database-backed store (recipes below)
 
@@ -787,7 +789,7 @@ $$;
 <!-- capacity-postgres-recipe:end -->
 
 ```ts
-import type { CapacityReservation, CapacityReservationLedger } from 'cost-governor-kit/reserveConfirm';
+import type { CapacityReservation, CapacityReservationLedger } from '@evidencekit/spend-limits/reserveConfirm';
 
 // Any Postgres driver: node-postgres, postgres.js (wrap it), Drizzle's
 // db.execute, Neon, or PGlite. It must return the rows of one statement.
@@ -1006,7 +1008,7 @@ read the provider's raw `usage` from the response.
 
 **Never settle a missing cost as zero.** A missing or `NaN` cost is `{ usage: 'unknown' }`, not `actualAmount: 0`: some real runs do report a cost of exactly 0, and a missing one that is mapped to 0 undercounts silently.
 
-## 1. Pricing (`cost-governor-kit/pricing`)
+## 1. Pricing (`@evidencekit/spend-limits/pricing`)
 
 ### `estimateCostUsd(rates, usage): number`
 
@@ -1280,7 +1282,7 @@ plain object.
 
 ---
 
-## 2. Pre-call ceiling (`cost-governor-kit/preCallCeiling`)
+## 2. Pre-call ceiling (`@evidencekit/spend-limits/preCallCeiling`)
 
 ### `checkPreCallCeiling(check): PreCallCeilingResult`
 
@@ -1336,12 +1338,12 @@ not take: it also prices the next call before allowing it.
 
 ---
 
-## 3. Usage counting (`cost-governor-kit/reserveConfirm`)
+## 3. Usage counting (`@evidencekit/spend-limits/reserveConfirm`)
 
 ### Advisory: `withReserveConfirm(ledger, key, limit, doTheCall)`
 
 ```ts
-import { withReserveConfirm, type UsageLedger } from 'cost-governor-kit/reserveConfirm';
+import { withReserveConfirm, type UsageLedger } from '@evidencekit/spend-limits/reserveConfirm';
 
 declare const myLedger: UsageLedger; // your storage
 
@@ -1381,7 +1383,7 @@ concurrent calls at limit 3 and all 10 run). It never retries.
 ### Strict: `withCapacityReservation(ledger, request, doTheWork)`
 
 ```ts
-import { withCapacityReservation, type CapacityReservationLedger } from 'cost-governor-kit/reserveConfirm';
+import { withCapacityReservation, type CapacityReservationLedger } from '@evidencekit/spend-limits/reserveConfirm';
 
 declare const ledger: CapacityReservationLedger; // your atomic, durable adapter
 
@@ -1775,7 +1777,7 @@ behavior under a network partition or Postgres failover.
 
 ## Related
 
-[`honesty-mcp`](https://github.com/lkopietz3-byte/honesty-mcp) (a sibling project) depends on this kit and exposes it as a
+[`@evidencekit/mcp`](https://github.com/evidencekit/mcp) (a sibling project) depends on this kit and exposes it as a
 `scaffold_cost_governor` guidance tool rather than a check tool, because the
 ledger contracts need your storage. This kit does not depend on any other kit.
 

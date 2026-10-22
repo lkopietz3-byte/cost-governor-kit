@@ -27,7 +27,7 @@ Preserve holds after ambiguous work or confirmation rejection, and keep known
 estimated spend separate from unknown usage and provider billing. Pricing defaults
 to a fixed 0.1x cache-read ratio unless `cacheReadPerMillion` overrides it.
 
-The separate [observatory draft PR #16](https://github.com/lkopietz3-byte/cost-governor-kit/pull/16)
+The separate [observatory draft PR #16](https://github.com/evidencekit/spend-limits/pull/16)
 demonstrates synthetic sequential capacity decisions. It is under review, absent
 from current main and excluded from this documentation PR. It does not establish
 production concurrency, provider billing or a strict dollar budget. Lucas owns

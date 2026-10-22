@@ -12,19 +12,19 @@ import {
   type PricingTable,
   type UsageLedger,
   type UsageTokens,
-} from 'cost-governor-kit';
+} from '@evidencekit/spend-limits';
 import {
   CACHE_READ_MULTIPLIER,
   estimateCostUsd as pricingSubpath,
   formatRatesForLog,
   type ModelRates as SubpathRates,
   type UsageTokens as SubpathUsage,
-} from 'cost-governor-kit/pricing';
+} from '@evidencekit/spend-limits/pricing';
 import {
   checkPreCallCeiling as ceilingSubpath,
   type PreCallCeilingCheck,
   type PreCallCeilingResult,
-} from 'cost-governor-kit/preCallCeiling';
+} from '@evidencekit/spend-limits/preCallCeiling';
 import {
   withCapacityReservation as reservationSubpath,
   type CapacityReservation,
@@ -33,7 +33,7 @@ import {
   type ReserveCapacityRequest,
   type ReserveCapacityResult,
   type ReserveConfirmResult,
-} from 'cost-governor-kit/reserveConfirm';
+} from '@evidencekit/spend-limits/reserveConfirm';
 
 import {
   admitBeforeCall,
@@ -46,7 +46,7 @@ import {
   type AdmissionUnavailableReason,
   type AdmissionWindow,
   type AdmitOutcome,
-} from 'cost-governor-kit/admission';
+} from '@evidencekit/spend-limits/admission';
 import {
   assertPricingFresh,
   definePricingTable,
@@ -60,15 +60,15 @@ import {
   type DatedPricingTable,
   type PriceLookup,
   type UsageReading,
-} from 'cost-governor-kit/pricing';
+} from '@evidencekit/spend-limits/pricing';
 import {
   createCommitOnce,
   withCapacityReservations,
   type CapacityReservationsResult,
   type CapacitySettlement,
   type CommitOnce,
-} from 'cost-governor-kit/reserveConfirm';
-import { createInMemoryCapacityLedger } from 'cost-governor-kit';
+} from '@evidencekit/spend-limits/reserveConfirm';
+import { createInMemoryCapacityLedger } from '@evidencekit/spend-limits';
 
 const table: PricingTable = { 'toy-model': { inputPerMillion: 3, outputPerMillion: 15 } };
 const rates: ModelRates = getRatesOrThrow(table, 'toy-model');

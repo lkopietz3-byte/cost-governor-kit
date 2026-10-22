@@ -4,11 +4,11 @@
 // Ported from the package probe in this repo's history and extended.
 // No network, no provider calls.
 import assert from 'node:assert/strict';
-import * as root from 'cost-governor-kit';
-import * as pricing from 'cost-governor-kit/pricing';
-import * as ceiling from 'cost-governor-kit/preCallCeiling';
-import * as reserve from 'cost-governor-kit/reserveConfirm';
-import * as admission from 'cost-governor-kit/admission';
+import * as root from '@evidencekit/spend-limits';
+import * as pricing from '@evidencekit/spend-limits/pricing';
+import * as ceiling from '@evidencekit/spend-limits/preCallCeiling';
+import * as reserve from '@evidencekit/spend-limits/reserveConfirm';
+import * as admission from '@evidencekit/spend-limits/admission';
 
 // Subpaths re-export the same functions as the root entry.
 for (const [name, fn] of Object.entries({ ...pricing, ...ceiling, ...reserve, ...admission })) {

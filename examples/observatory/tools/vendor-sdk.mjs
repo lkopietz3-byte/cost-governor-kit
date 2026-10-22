@@ -7,13 +7,13 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const args = process.argv.slice(2);
-if (args.length && (args.length !== 2 || args[0] !== '--source')) throw new Error('Usage: node tools/vendor-sdk.mjs [--source /absolute/cost-governor-kit]');
+if (args.length && (args.length !== 2 || args[0] !== '--source')) throw new Error('Usage: node tools/vendor-sdk.mjs [--source /absolute/spend-limits]');
 const source = path.resolve(args[1] || path.join(root, '../..'));
 const require = createRequire(path.join(source, 'package.json'));
 const ts = require('typescript');
 const hash = data => createHash('sha256').update(data).digest('hex');
 const pkg = JSON.parse(await readFile(path.join(source, 'package.json'), 'utf8'));
-if (pkg.name !== 'cost-governor-kit') throw new Error('Source must be the owning Cost Governor package.');
+if (pkg.name !== '@evidencekit/spend-limits') throw new Error('Source must be the owning Cost Governor package.');
 const destination = path.join(root, 'vendor/cost-governor-kit');
 await mkdir(destination, { recursive: true });
 const manifest = {

@@ -1,6 +1,6 @@
 # Threshold
 
-Watch a request find its way. Threshold makes the cost-governor-kit SDK visible through a clean decision canvas: packets travel along the recorded path, visited stages illuminate, capacity fills, and outcomes branch into confirmed, stopped, released or unresolved work.
+Watch a request find its way. Threshold makes the @evidencekit/spend-limits SDK visible through a clean decision canvas: packets travel along the recorded path, visited stages illuminate, capacity fills, and outcomes branch into confirmed, stopped, released or unresolved work.
 
 ## Open the canvas
 
@@ -29,7 +29,7 @@ Comparisons require the same scenario, rates and planned requests. Other plans e
 
 ## What actually runs
 
-The prepared modules come from the owning `cost-governor-kit/src` at the revision in `vendor/cost-governor-kit/source.json`. The browser checks six prepared file hashes against that local manifest before enabling Run. The manifest establishes correspondence, not external signing authority. `dist` is not a source cache.
+The prepared modules come from the owning `@evidencekit/spend-limits/src` at the revision in `vendor/cost-governor-kit/source.json`. The browser checks six prepared file hashes against that local manifest before enabling Run. The manifest establishes correspondence, not external signing authority. `dist` is not a source cache.
 
 The example calls the real `estimateCostUsd`, `checkPreCallCeiling` and `withCapacityReservation`. A bounded sequential memory ledger and synthetic callbacks supply six experiments: mixed success/refusal/release, cost boundaries, known failure, unresolved work/confirmation, repeated IDs and cache pricing. A run has at most seven attempts. Each journal event records a sequence, attempt ID, operation ID, stage, result and frozen state snapshot.
 
@@ -54,7 +54,7 @@ Malformed/future data, invalid settings/dates, repeated IDs and unknown fields b
 From the owning repository, run `npm run verify:observatory` (CI runs it as its own step; it is not part of the package's `npm run verify` release gate). Change into `examples/observatory` for the focused commands below:
 
 ```sh
-node tools/verify-source.mjs --source /absolute/cost-governor-kit
+node tools/verify-source.mjs --source /absolute/spend-limits
 node --test tests/session.check.mjs tests/insights.check.mjs tests/notebook.check.mjs
 node tools/verify-browser.mjs --url http://127.0.0.1:4320 --out /absolute/new-evidence-folder --playwright-root /absolute/playwright-package
 node tools/measure-render.mjs --url http://127.0.0.1:4320/ --source /absolute/example-folder --out /absolute/new-measure-folder --pw /absolute/playwright-package

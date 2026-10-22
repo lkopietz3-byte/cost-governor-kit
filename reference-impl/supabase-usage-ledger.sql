@@ -205,7 +205,7 @@ grant execute on function usage_ledger_commit_usage(text, integer, text) to serv
 -- the limit. Build one adapter per (window, limit) and pass the SAME limit to
 -- withReserveConfirm; otherwise Phase 2 re-checks a different limit.
 --
---   import type { UsageLedger } from 'cost-governor-kit/reserveConfirm';
+--   import type { UsageLedger } from '@evidencekit/spend-limits/reserveConfirm';
 --   import { createClient } from '@supabase/supabase-js';
 --
 --   const supabase = createClient(url, serviceRoleKey);
