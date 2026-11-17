@@ -134,7 +134,7 @@ mutants killed, none survived) and v8 coverage was 100% of lines and branches.
 Those numbers are for 0.2.0. The admission, pricing-table, usage-reader and
 capacity-ledger code added since has not been through mutation testing and its
 coverage has not been measured. The v8 provider is
-`@vitest/coverage-v8@4.1.11`, installed with `--no-save`.
+`@vitest/coverage-v8@4.1.12`, installed with `--no-save`.
 
 `verify:package` packs the build, rejects tests/configs/scripts in the
 tarball, installs it offline into a temporary project, imports every export,
