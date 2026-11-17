@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-## [0.3.0] - unreleased
+## [0.3.0] - 2026-10-12
 
 Minor release. The exports are all additive: every 0.2.1 export is still there
 with the same name and signature. A few inputs that were accepted now throw, and

@@ -4,7 +4,6 @@ Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates
 
 ## Read first
 - `ENGINEERING.md` holds this package's invariants and design rules; read it before changing behavior.
-- `PROJECT_CONTEXT.md` is the current project state and decisions.
 - `SECURITY.md` covers the security posture; follow it for anything touching input handling.
 
 ## Commands (from package.json)
@@ -24,11 +23,6 @@ Pre-call AI spend ceilings, cache-aware token pricing with caller-supplied rates
 - Do not run `npm publish` or push tags without explicit permission. Treat any claim that a version is published as Reported until the registry confirms it.
 - Runtime `dependencies` stay empty; add dev tooling only.
 - Keep unrelated uncommitted work intact; never stage or reset the whole tree.
-
-## Review preparation
-
-Use [docs/REVIEW_READINESS.md](docs/REVIEW_READINESS.md) for milestone review cadence and launch-preparation evidence.
-
 
 ## Code Review Rules
 
