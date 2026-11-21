@@ -6,6 +6,16 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-20
+
+Documentation only. The package code and API are the same as 0.3.0.
+
+### Changed
+
+- The packaged CHANGELOG dates every release. The 0.3.0 package listed its own version as unreleased.
+- The README points to its full version on GitHub, since npm cuts long READMEs off, and links that land past that point go to GitHub.
+- The link to the observatory example points to GitHub.
+
 ## [0.3.0] - 2026-10-12
 
 Minor release. The exports are all additive: every 0.2.1 export is still there
