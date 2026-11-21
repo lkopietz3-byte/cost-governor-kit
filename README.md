@@ -1,5 +1,7 @@
 # cost-governor-kit
 
+This README is long, and npm cuts it off partway. If the page stops early, read the [full version on GitHub](https://github.com/lkopietz3-byte/cost-governor-kit/blob/main/README.md).
+
 **[Try it in your browser →](https://lkopietz3-byte.github.io/honesty-kits/#cost-governor-kit)** · Part of [honesty kits](https://github.com/lkopietz3-byte/honesty-kits), a family of small checks for the claims an AI product makes.
 
 **Fail-closed admission and spend caps for AI endpoints, on a database you
@@ -43,7 +45,7 @@ nothing when its store is not configured.
 | Cap dollars per user and globally, streaming included | [Daily dollar caps per user and global](#daily-dollar-caps-per-user-and-global) |
 | Price a call from a dated table, exact to the micro-dollar | [Dated price tables](#dated-price-tables-definepricingtable-assertpricingfresh-pricefor) and [`estimateCostMicros`](#estimatecostmicrosusage-price-number) |
 | Read a provider's usage, or admit you cannot | [Provider usage](#provider-usage-usagefromanthropicusage-usagefromopenaiusage) |
-| Refuse one call that would pass a spend ceiling | [Pre-call ceiling](#2-pre-call-ceiling-cost-governor-kitprecallceiling) |
+| Refuse one call that would pass a spend ceiling | [Pre-call ceiling](https://github.com/lkopietz3-byte/cost-governor-kit/blob/main/README.md#2-pre-call-ceiling-cost-governor-kitprecallceiling) |
 
 Quick map of the pieces: `admitBeforeCall` (call caps), `withCapacityReservations`
 (dollar caps over several scopes), `withCapacityReservation` (one scope),
@@ -80,7 +82,7 @@ compatibility testing, not a recommendation. `engines` in `package.json` is
 ## Visual example: Threshold
 
 The repository includes a visual example in
-[`examples/observatory`](examples/observatory/README.md). Run bounded synthetic
+[`examples/observatory`](https://github.com/lkopietz3-byte/cost-governor-kit/blob/main/examples/observatory/README.md). Run bounded synthetic
 requests through the actual SDK, inspect the cost/capacity decisions, and replay
 the recorded journal for a walkthrough. It uses an educational memory adapter;
 production enforcement and provider billing are separate concerns.
@@ -1420,7 +1422,7 @@ concurrent requests at limit 3 all run.
   soft hyphen and similar). `limit: 0` is passed to the adapter, which should
   deny; the helper does not deny locally. The adapter receives a fresh
   `{ key, limit, operationId }` copy (plus `amount` when you pass one; see
-  [Dollar amounts on a strict reservation](#dollar-amounts-on-a-strict-reservation)),
+  [Dollar amounts on a strict reservation](https://github.com/lkopietz3-byte/cost-governor-kit/blob/main/README.md#dollar-amounts-on-a-strict-reservation)),
   and every later comparison uses the
   validated values, so neither your changing the request object mid-flight nor
   the adapter editing its argument can change what a reservation is checked
