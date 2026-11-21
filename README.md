@@ -1,6 +1,6 @@
 # cost-governor-kit
 
-This README is long, and npm cuts it off partway. If the page stops early, read the [full version on GitHub](https://github.com/lkopietz3-byte/cost-governor-kit/blob/main/README.md).
+Refuse a paid AI call before it runs when a spend or call cap can't be confirmed. You supply the database and the prices.
 
 **[Try it in your browser →](https://lkopietz3-byte.github.io/honesty-kits/#cost-governor-kit)** · Part of [honesty kits](https://github.com/lkopietz3-byte/honesty-kits), a family of small checks for the claims an AI product makes.
 
